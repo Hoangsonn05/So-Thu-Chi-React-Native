@@ -1,0 +1,1 @@
+ninja: error: Stat(safeareacontext_autolinked_build/CMakeFiles/react_codegen_safeareacontext.dir/D_/Project_android_studio/So-Thu-Chi-React/SoThuChiRN/node_modules/react-native-safe-area-context/android/build/generated/source/codegen/jni/react/renderer/components/safeareacontext/safeareacontextJSI-generated.cpp.o): Filename longer than 260 characters

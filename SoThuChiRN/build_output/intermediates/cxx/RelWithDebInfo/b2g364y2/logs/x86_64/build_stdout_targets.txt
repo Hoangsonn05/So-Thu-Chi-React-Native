@@ -1,0 +1,3 @@
+ninja: Entering directory `D:\Project_android_studio\So-Thu-Chi-React\SoThuChiRN\android\app\.cxx\RelWithDebInfo\b2g364y2\x86_64'
+[0/2] Re-checking globbed directories...
+ninja: no work to do.

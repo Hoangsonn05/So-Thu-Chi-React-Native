@@ -1,0 +1,28 @@
+CMake Warning in D:/Project_android_studio/So-Thu-Chi-React/SoThuChiRN/node_modules/react-native-safe-area-context/android/src/main/jni/CMakeLists.txt:
+  The object file directory
+
+    D:/Project_android_studio/So-Thu-Chi-React/SoThuChiRN/android/app/.cxx/RelWithDebInfo/b2g364y2/armeabi-v7a/safeareacontext_autolinked_build/CMakeFiles/react_codegen_safeareacontext.dir/./
+
+  has 187 characters.  The maximum full path to an object file is 250
+  characters (see CMAKE_OBJECT_PATH_MAX).  Object file
+
+    D_/Project_android_studio/So-Thu-Chi-React/SoThuChiRN/node_modules/react-native-safe-area-context/common/cpp/react/renderer/components/safeareacontext/RNCSafeAreaViewShadowNode.cpp.o
+
+  cannot be safely placed under this directory.  The build may not work
+  correctly.
+
+
+CMake Warning in D:/Project_android_studio/So-Thu-Chi-React/SoThuChiRN/node_modules/react-native-screens/android/src/main/jni/CMakeLists.txt:
+  The object file directory
+
+    D:/Project_android_studio/So-Thu-Chi-React/SoThuChiRN/android/app/.cxx/RelWithDebInfo/b2g364y2/armeabi-v7a/rnscreens_autolinked_build/CMakeFiles/react_codegen_rnscreens.dir/./
+
+  has 175 characters.  The maximum full path to an object file is 250
+  characters (see CMAKE_OBJECT_PATH_MAX).  Object file
+
+    D_/Project_android_studio/So-Thu-Chi-React/SoThuChiRN/node_modules/react-native-screens/common/cpp/react/renderer/components/rnscreens/RNSScreenStackHeaderSubviewShadowNode.cpp.o
+
+  cannot be safely placed under this directory.  The build may not work
+  correctly.
+
+

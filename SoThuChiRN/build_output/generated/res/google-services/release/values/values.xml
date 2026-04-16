@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="firebase_database_url" translatable="false">https://sothuchi-53e1c-default-rtdb.asia-southeast1.firebasedatabase.app</string>
+    <string name="gcm_defaultSenderId" translatable="false">917615689663</string>
+    <string name="google_api_key" translatable="false">AIzaSyAJa-psFSV4BL2qnYwCrfyNL9WoOUbMYsU</string>
+    <string name="google_app_id" translatable="false">1:917615689663:android:8d0d4aa2fbc0fea21bab0a</string>
+    <string name="google_crash_reporting_api_key" translatable="false">AIzaSyAJa-psFSV4BL2qnYwCrfyNL9WoOUbMYsU</string>
+    <string name="google_storage_bucket" translatable="false">sothuchi-53e1c.firebasestorage.app</string>
+    <string name="project_id" translatable="false">sothuchi-53e1c</string>
+</resources>
