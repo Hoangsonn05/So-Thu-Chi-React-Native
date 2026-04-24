@@ -132,12 +132,12 @@ export default function TelegramBotModal({ visible, onClose }: TelegramBotModalP
                 {/* Input Field */}
                 <View className="mb-6">
                   <Text className="text-[10px] font-bold text-gray-500 mb-2 uppercase tracking-wider">Bot Token</Text>
-                  <View className="flex-row items-center bg-white/5 rounded-xl border border-white/10 px-3 h-12">
-                    <Ionicons name="key-outline" size={18} color="#718096" />
+                  <View className="flex-row items-center bg-white/10 rounded-xl border border-white/20 px-3 h-12">
+                    <Ionicons name="key-outline" size={18} color="#A0AEC0" />
                     <TextInput
                       className="flex-1 text-base text-white ml-2"
                       placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-                      placeholderTextColor="#555555"
+                      placeholderTextColor="#777777"
                       value={token}
                       onChangeText={setToken}
                       autoCapitalize="none"
@@ -154,11 +154,11 @@ export default function TelegramBotModal({ visible, onClose }: TelegramBotModalP
                 >
                   <View className="bg-primaryGreen h-12 rounded-xl items-center justify-center flex-row">
                     {isLoading ? (
-                      <ActivityIndicator color="#000000" />
+                      <ActivityIndicator color="#FFFFFF" />
                     ) : (
                       <>
-                        <Ionicons name="link" size={18} color="#000000" />
-                        <Text className="text-black font-bold text-base ml-2">Kết nối Bot</Text>
+                        <Ionicons name="link" size={18} color="#FFFFFF" />
+                        <Text className="text-white font-bold text-base ml-2">Kết nối Bot</Text>
                       </>
                     )}
                   </View>
