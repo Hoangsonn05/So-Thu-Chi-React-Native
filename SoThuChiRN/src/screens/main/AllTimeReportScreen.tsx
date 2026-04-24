@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   ScrollView,
   TouchableOpacity,
   Dimensions,
@@ -10,13 +9,14 @@ import {
   Animated,
   Easing,
 } from 'react-native';
-import { Colors, Spacing, BorderRadius, FontSize } from '../../theme/colors';
+import { Colors } from '../../theme/colors';
 import GlassBox from '../../components/GlassBox';
 import db from '../../database/DatabaseHelper';
 import { Transaction } from '../../models/Transaction';
 import { PieChart } from 'react-native-gifted-charts';
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
+import { transactionEvents } from '../../services/TransactionEvents';
 
 const { width } = Dimensions.get('window');
 
@@ -88,6 +88,14 @@ export default function AllTimeReportScreen({ navigation }: any) {
   }, [fetchAllTimeData]);
 
   useEffect(() => {
+    const unsubscribe = transactionEvents.subscribe(() => {
+      fetchAllTimeData();
+    });
+
+    return unsubscribe;
+  }, [fetchAllTimeData]);
+
+  useEffect(() => {
     if (!isLoading && categories.length > 0) {
       sweepAnim.setValue(0);
       scaleAnim.setValue(0.85);
@@ -131,12 +139,11 @@ export default function AllTimeReportScreen({ navigation }: any) {
     return new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(amount);
   };
 
-  // Calculate cumulative limit for manual sweep effect
   const totalAmount = categories.reduce((sum, c) => sum + c.amount, 0);
   let currentAccumulated = 0;
   const currentLimit = sweepProgress * totalAmount;
 
-  const animatedPieData = categories.map((cat, idx) => {
+  const animatedPieData = categories.map((cat) => {
     const startValue = currentAccumulated;
     currentAccumulated += cat.amount;
     
@@ -148,72 +155,72 @@ export default function AllTimeReportScreen({ navigation }: any) {
     }
 
     return {
-      value: displayAmount || 0.01, // Avoid 0 for gifted-charts
+      value: displayAmount || 0.01,
       color: cat.color,
     };
   });
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
-        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-          <Ionicons name="chevron-back" size={24} color={Colors.white} />
+    <View className="flex-1 bg-background">
+      <View className="h-[90px] flex-row items-center justify-between px-4 pt-10 z-10">
+        <BlurView intensity={80} tint="dark" className="absolute inset-0" />
+        <TouchableOpacity className="w-10 h-10 items-center justify-center" onPress={() => navigation.goBack()}>
+          <Ionicons name="chevron-back" size={24} color="#FFF" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Báo cáo toàn kì</Text>
-        <View style={{ width: 40 }} />
+        <Text className="text-lg font-bold text-white">Báo cáo toàn kì</Text>
+        <View className="w-10" />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <GlassBox style={styles.summaryCard} padding={20}>
-          <Text style={styles.summaryTitle}>Tổng kết tài chính</Text>
-          <View style={styles.summaryDivider} />
-          <View style={styles.summaryRow}>
-            <View style={styles.summaryColumn}>
-              <Text style={styles.summaryLabel}>Tổng thu</Text>
-              <Text style={[styles.summaryValue, { color: Colors.accentIncome }]}>
+      <ScrollView contentContainerStyle={{ padding: 16 }} showsVerticalScrollIndicator={false}>
+        <GlassBox className="mb-4" padding={20}>
+          <Text className="text-base font-bold text-white mb-3">Tổng kết tài chính</Text>
+          <View className="h-[1px] bg-white/10 my-3 opacity-30" />
+          <View className="flex-row items-center">
+            <View className="flex-1 items-center">
+              <Text className="text-[10px] text-gray-500 mb-1">Tổng thu</Text>
+              <Text className="text-base font-bold text-income">
                 +{formatCurrency(totalIncome)}
               </Text>
             </View>
-            <View style={styles.verticalDivider} />
-            <View style={styles.summaryColumn}>
-              <Text style={styles.summaryLabel}>Tổng chi</Text>
-              <Text style={[styles.summaryValue, { color: Colors.accentExpense }]}>
+            <View className="w-[1px] h-8 bg-white/10 opacity-30" />
+            <View className="flex-1 items-center">
+              <Text className="text-[10px] text-gray-500 mb-1">Tổng chi</Text>
+              <Text className="text-base font-bold text-expense">
                 -{formatCurrency(totalExpense)}
               </Text>
             </View>
           </View>
-          <View style={styles.summaryDivider} />
-          <View style={styles.totalRow}>
-            <Text style={styles.totalLabel}>Số dư thực tế</Text>
-            <Text style={[styles.totalValue, { color: balance >= 0 ? Colors.accentBlue : Colors.accentExpense }]}>
+          <View className="h-[1px] bg-white/10 my-3 opacity-30" />
+          <View className="flex-row justify-between items-center">
+            <Text className="text-sm text-gray-400">Số dư thực tế</Text>
+            <Text className={`text-2xl font-bold ${balance >= 0 ? 'text-accent' : 'text-expense'}`}>
               {formatCurrency(balance)}
             </Text>
           </View>
         </GlassBox>
 
-        <View style={styles.typeSelector}>
+        <View className="flex-row bg-white/5 rounded-full p-1 mb-4">
           <TouchableOpacity 
-            style={[styles.typeBtn, activeType === 0 && styles.typeBtnActive]}
+            className={`flex-1 py-2 items-center rounded-full ${activeType === 0 ? 'bg-white/10' : ''}`}
             onPress={() => setActiveType(0)}
           >
-            <Text style={[styles.typeText, activeType === 0 && styles.typeTextActive]}>Chi tiêu</Text>
+            <Text className={`text-sm ${activeType === 0 ? 'text-white font-bold' : 'text-gray-500'}`}>Chi tiêu</Text>
           </TouchableOpacity>
           <TouchableOpacity 
-            style={[styles.typeBtn, activeType === 1 && styles.typeBtnActive]}
+            className={`flex-1 py-2 items-center rounded-full ${activeType === 1 ? 'bg-white/10' : ''}`}
             onPress={() => setActiveType(1)}
           >
-            <Text style={[styles.typeText, activeType === 1 && styles.typeTextActive]}>Thu nhập</Text>
+            <Text className={`text-sm ${activeType === 1 ? 'text-white font-bold' : 'text-gray-500'}`}>Thu nhập</Text>
           </TouchableOpacity>
         </View>
 
         {isLoading ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color={Colors.accentBlue} />
+          <View className="h-[300px] justify-center items-center">
+            <ActivityIndicator size="large" color="#00B0FF" />
           </View>
         ) : categories.length > 0 ? (
-          <GlassBox style={styles.chartCard} padding={20}>
-            <View style={styles.chartContainer}>
+          <GlassBox className="mb-4" padding={20}>
+            <View className="items-center my-5">
               <Animated.View style={{ 
                 transform: [{ scale: scaleAnim }],
                 opacity: sweepAnim.interpolate({ inputRange: [0, 0.1, 1], outputRange: [0, 1, 1] })
@@ -225,13 +232,13 @@ export default function AllTimeReportScreen({ navigation }: any) {
                     sectionAutoFocus
                     radius={100}
                     innerRadius={70}
-                    innerCircleColor={Colors.bg}
+                    innerCircleColor="#0A0B1A"
                     centerLabelComponent={() => (
-                      <View style={{ justifyContent: 'center', alignItems: 'center' }}>
-                        <Text style={{ fontSize: 22, color: Colors.textPrimary, fontWeight: 'bold' }}>
+                      <View className="justify-center items-center">
+                        <Text className="text-[22px] text-white font-bold">
                           {Math.round(sweepProgress * 100)}%
                         </Text>
-                        <Text style={{ fontSize: 12, color: Colors.textTertiary }}>Tiến độ</Text>
+                        <Text className="text-[12px] text-gray-500">Tiến độ</Text>
                       </View>
                     )}
                   />
@@ -239,83 +246,27 @@ export default function AllTimeReportScreen({ navigation }: any) {
               </Animated.View>
             </View>
 
-            <View style={styles.categoryList}>
+            <View className="mt-2.5">
               {categories.map((item, index) => (
-                <View key={index} style={styles.categoryItem}>
-                  <View style={[styles.colorDot, { backgroundColor: item.color }]} />
-                  <Text style={styles.categoryName}>{item.name}</Text>
-                  <View style={styles.categoryRight}>
-                    <Text style={styles.categoryAmount}>{formatCurrency(item.amount)}</Text>
-                    <Text style={styles.categoryPercent}>{item.percentage.toFixed(1)}%</Text>
+                <View key={index} className="flex-row items-center py-3 border-b border-white/5">
+                  <View className="w-2.5 h-2.5 rounded-full mr-3" style={{ backgroundColor: item.color }} />
+                  <Text className="flex-1 text-sm text-white font-medium">{item.name}</Text>
+                  <View className="items-end">
+                    <Text className="text-sm font-bold text-white">{formatCurrency(item.amount)}</Text>
+                    <Text className="text-[10px] text-gray-500">{item.percentage.toFixed(1)}%</Text>
                   </View>
                 </View>
               ))}
             </View>
           </GlassBox>
         ) : (
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyText}>Không có dữ liệu cho mục này</Text>
+          <View className="h-[200px] justify-center items-center">
+            <Text className="text-gray-500 text-base font-medium">Không có dữ liệu cho mục này</Text>
           </View>
         )}
 
-        <View style={{ height: 40 }} />
+        <View className="h-[40px]" />
       </ScrollView>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.bg },
-  header: {
-    height: 90,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: Spacing.md,
-    paddingTop: 40,
-    zIndex: 10,
-  },
-  headerTitle: { fontSize: FontSize.lg, fontWeight: 'bold', color: Colors.white },
-  backBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  scrollContent: { padding: Spacing.md },
-  summaryCard: { marginBottom: Spacing.md },
-  summaryTitle: { fontSize: FontSize.md, fontWeight: 'bold', color: Colors.textPrimary, marginBottom: 12 },
-  summaryDivider: { height: 1, backgroundColor: Colors.glassBorder, marginVertical: 12, opacity: 0.3 },
-  summaryRow: { flexDirection: 'row', alignItems: 'center' },
-  summaryColumn: { flex: 1, alignItems: 'center' },
-  summaryLabel: { fontSize: FontSize.xs, color: Colors.textTertiary, marginBottom: 4 },
-  summaryValue: { fontSize: FontSize.md, fontWeight: 'bold' },
-  verticalDivider: { width: 1, height: 30, backgroundColor: Colors.glassBorder, opacity: 0.3 },
-  totalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  totalLabel: { fontSize: FontSize.sm, color: Colors.textSecondary },
-  totalValue: { fontSize: FontSize.xl, fontWeight: 'bold' },
-  typeSelector: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: BorderRadius.full,
-    padding: 4,
-    marginBottom: Spacing.md,
-  },
-  typeBtn: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: BorderRadius.full },
-  typeBtnActive: { backgroundColor: 'rgba(255, 255, 255, 0.1)' },
-  typeText: { fontSize: FontSize.sm, color: Colors.textTertiary },
-  typeTextActive: { color: Colors.textPrimary, fontWeight: 'bold' },
-  loadingContainer: { height: 300, justifyContent: 'center', alignItems: 'center' },
-  chartCard: { marginBottom: Spacing.md },
-  chartContainer: { alignItems: 'center', marginVertical: 20 },
-  categoryList: { marginTop: 10 },
-  categoryItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.05)',
-  },
-  colorDot: { width: 10, height: 10, borderRadius: 5, marginRight: 12 },
-  categoryName: { flex: 1, fontSize: FontSize.sm, color: Colors.textPrimary },
-  categoryRight: { alignItems: 'flex-end' },
-  categoryAmount: { fontSize: FontSize.sm, fontWeight: 'bold', color: Colors.textPrimary },
-  categoryPercent: { fontSize: FontSize.xs, color: Colors.textTertiary },
-  emptyContainer: { height: 200, justifyContent: 'center', alignItems: 'center' },
-  emptyText: { color: Colors.textTertiary, fontSize: FontSize.md },
-});

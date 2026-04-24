@@ -18,7 +18,8 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { View, ActivityIndicator, StyleSheet, StatusBar } from 'react-native';
+import './src/styles/global.css';
+import { View, ActivityIndicator, StyleSheet, StatusBar, Alert } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { firebaseAuth } from './src/config/firebase';
 import AppNavigator from './src/navigation/AppNavigator';
@@ -26,12 +27,100 @@ import { Colors } from './src/theme/colors';
 import NetInfo from '@react-native-community/netinfo';
 import OfflineStatusModal from './src/components/OfflineStatusModal';
 import { syncService } from './src/services/FirebaseSyncService';
+import { transactionEvents } from './src/services/TransactionEvents';
+import AIFloatingIsland from './src/components/AIFloatingIsland';
+import AIChatModal from './src/components/AIChatModal';
+import { db } from './src/database/DatabaseHelper';
+
+interface AIDetectedTransaction {
+  amount: number;
+  note: string;
+  category: string;
+  date: string;
+  shouldAutoSubmit: boolean;
+  message: string;
+  type: 0 | 1;
+}
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [isInitializing, setIsInitializing] = useState<boolean>(true);
   const [showNetworkGuard, setShowNetworkGuard] = useState<boolean>(false);
   const [hasDismissedGuard, setHasDismissedGuard] = useState<boolean>(false);
+  const [isAIChatModalVisible, setIsAIChatModalVisible] = useState<boolean>(false);
+  const [currentDate, setCurrentDate] = useState<string>(() => {
+    const today = new Date();
+    const formatter = new Intl.DateTimeFormat('vi-VN', {
+      weekday: 'short',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    return formatter.format(today);
+  });
+
+  const toDdMmYyyy = (value?: string): string => {
+    const fallback = new Date();
+    const fallbackDate = `${String(fallback.getDate()).padStart(2, '0')}/${String(
+      fallback.getMonth() + 1
+    ).padStart(2, '0')}/${fallback.getFullYear()}`;
+
+    if (!value) return fallbackDate;
+
+    const match = value.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    if (!match) return fallbackDate;
+
+    return `${match[1]}/${match[2]}/${match[3]}`;
+  };
+
+  const handleAIDetectedTransaction = async (transactionData: AIDetectedTransaction) => {
+    const amount = Number(transactionData?.amount || 0);
+    const category = String(transactionData?.category || '').trim();
+    const type = transactionData?.type === 1 ? 1 : 0;
+    const note = String(transactionData?.note || transactionData?.message || 'Giao dịch từ AI').trim();
+    const date = toDdMmYyyy(transactionData?.date);
+
+    if (!amount || amount <= 0 || !category) {
+      return;
+    }
+
+    try {
+      const localId = await db.addTransaction({
+        amount,
+        note,
+        category,
+        date,
+        type,
+      });
+
+      if (localId === -1) {
+        Alert.alert('Lỗi', 'Không thể lưu giao dịch từ AI');
+        return;
+      }
+
+      const netInfo = await NetInfo.fetch();
+      const user = firebaseAuth().currentUser;
+
+      if (user && netInfo.isConnected && netInfo.isInternetReachable !== false) {
+        const allTransactions = await db.getAllTransactions();
+        const newTx = allTransactions.find((t) => t.id === localId);
+        if (newTx) {
+          await syncService.pushSingleTransaction(user.uid, newTx, 'legacy');
+        }
+      }
+
+      // Realtime update for active screens without tab switch
+      transactionEvents.emitChanged();
+
+      Alert.alert(
+        '✅ Đã lưu',
+        `Ghi nhận ${type === 0 ? 'chi' : 'thu'} ${amount.toLocaleString('vi-VN')} ₫`
+      );
+    } catch (error) {
+      console.error('AI transaction save failed:', error);
+      Alert.alert('Lỗi', 'Không thể lưu giao dịch AI vào ứng dụng');
+    }
+  };
 
   useEffect(() => {
     // Theo dõi trạng thái mạng
@@ -68,12 +157,12 @@ export default function App() {
       if (user) {
         // Khởi động lắng nghe Session (Remote Logout)
         const { sessionService } = require('./src/services/SessionService');
-        const db = require('./src/database/DatabaseHelper').default;
+        const localDb = require('./src/database/DatabaseHelper').default;
 
         // Đăng ký lại session (trong trường hợp app bị tắt ngang)
-        // Bỏ await để tránh treo Splash Screen nếu app mở lên khi không có mạng
-        sessionService.registerSession(user.uid).catch(console.error);
-
+        // Dùng await để đảm bảo session sẵn sàng trước khi listener chạy
+        await sessionService.registerSession(user.uid).catch(console.error);
+ 
         sessionUnsubscribe = sessionService.listenToCurrentSession(user.uid, async () => {
           Alert.alert(
             '⚠️ Đã đăng xuất',
@@ -81,7 +170,7 @@ export default function App() {
             [{ text: 'OK' }]
           );
           
-          await db.clearAllData();
+          await localDb.clearAllData();
           await firebaseAuth().signOut();
         });
       } else {
@@ -127,6 +216,26 @@ export default function App() {
           setHasDismissedGuard(true);
         }} 
       />
+
+      {/* AI Float + Chat Modal (Only show when authenticated) */}
+      {isAuthenticated && (
+        <>
+          <AIFloatingIsland
+            isExpanded={isAIChatModalVisible}
+            onPress={() => setIsAIChatModalVisible(true)}
+            onExpandStart={() => {
+              // Optional: trigger animation or analytics
+            }}
+          />
+
+          <AIChatModal
+            isVisible={isAIChatModalVisible}
+            onClose={() => setIsAIChatModalVisible(false)}
+            currentDate={currentDate}
+            onTransactionDetected={handleAIDetectedTransaction}
+          />
+        </>
+      )}
     </View>
   );
 }

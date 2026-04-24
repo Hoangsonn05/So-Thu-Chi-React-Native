@@ -24,6 +24,7 @@ import { firebaseAuth, firestoreDb } from '../config/firebase';
 import { Ionicons } from '@expo/vector-icons';
 import NetInfo from '@react-native-community/netinfo';
 import { syncService } from '../services/FirebaseSyncService';
+import { transactionEvents } from '../services/TransactionEvents';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 const MIN_SHEET_HEIGHT = SCREEN_HEIGHT * 0.5;
@@ -131,6 +132,9 @@ export default function QuickAddModal({ visible, date, onClose, onSuccess }: Qui
       });
 
       if (localId !== -1) {
+        // Realtime refresh for all subscribed screens
+        transactionEvents.emitChanged();
+
         // Sync to cloud
         const netInfo = await NetInfo.fetch();
         const user = firebaseAuth().currentUser;
@@ -142,8 +146,8 @@ export default function QuickAddModal({ visible, date, onClose, onSuccess }: Qui
             syncService.pushSingleTransaction(user.uid, newTx, 'legacy').catch(console.error);
           }
         }
-      
-        
+
+
         resetForm();
         handleClose();
         setTimeout(onSuccess, 300); // Wait for animation
@@ -171,7 +175,7 @@ export default function QuickAddModal({ visible, date, onClose, onSuccess }: Qui
     >
       <View style={styles.modalRoot}>
         <Pressable style={styles.overlay} onPress={handleClose} />
-        <Animated.View 
+        <Animated.View
           style={[styles.animatedContainer, { transform: [{ translateY }] }]}
           {...panResponder.panHandlers}
         >
@@ -179,9 +183,9 @@ export default function QuickAddModal({ visible, date, onClose, onSuccess }: Qui
             behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
             style={styles.contentWrapper}
           >
-            <GlassBox 
-              padding={Spacing.lg} 
-              intensity={60} 
+            <GlassBox
+              padding={Spacing.lg}
+              intensity={60}
               style={styles.modalBox}
               borderRadius={BorderRadius.xl}
             >
@@ -245,8 +249,10 @@ export default function QuickAddModal({ visible, date, onClose, onSuccess }: Qui
                         styles.catItem,
                         selectedCategory === cat.name && { borderColor: isExpense ? Colors.accentExpense : Colors.accentIncome, borderWidth: 1 }
                       ]}>
-                        <Text style={styles.catEmoji}>{cat.emoji}</Text>
-                        <Text 
+                        <View style={styles.emojiContainer}>
+                          <Text style={styles.catEmoji}>{cat.emoji}</Text>
+                        </View>
+                        <Text
                           style={[styles.catName, selectedCategory === cat.name && { color: isExpense ? Colors.accentExpense : Colors.accentIncome, fontWeight: '700' }]}
                           numberOfLines={1}
                         >
@@ -398,9 +404,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  catEmoji: {
-    fontSize: 24,
+  emojiContainer: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
     marginBottom: 4,
+  },
+  catEmoji: {
+    fontSize: 20,
   },
   catName: {
     fontSize: 10,

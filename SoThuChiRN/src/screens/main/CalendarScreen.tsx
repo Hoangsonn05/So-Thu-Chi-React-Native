@@ -1,19 +1,11 @@
-/**
- * CalendarScreen.tsx
- * Re-scaled Compact UI
- */
-
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   TouchableOpacity,
   ScrollView,
-  Modal,
-  Pressable,
 } from 'react-native';
-import { Colors, Spacing, BorderRadius, FontSize } from '../../theme/colors';
+import { Colors } from '../../theme/colors';
 import GlassBox from '../../components/GlassBox';
 import { BlurView } from 'expo-blur';
 import db from '../../database/DatabaseHelper';
@@ -23,6 +15,7 @@ import QuickAddModal from '../../components/QuickAddModal';
 import { getCategoryEmoji } from '../../config/categories';
 import { CloudOff } from 'lucide-react-native';
 import UniversalDatePicker from '../../components/UniversalDatePicker';
+import { transactionEvents } from '../../services/TransactionEvents';
 
 interface CalendarDay {
   day: string;
@@ -118,10 +111,6 @@ export default function CalendarScreen() {
   const [focusedDate, setFocusedDate] = useState<string | null>(null);
   const [lastTap, setLastTap] = useState(0);
 
-  // Picker States
-  const [pickerMonth, setPickerMonth] = useState(month);
-  const [pickerYear, setPickerYear] = useState(year);
-
   const loadData = useCallback(async () => {
     try {
       const txns = await db.getTransactionsByMonth(month, year);
@@ -135,18 +124,17 @@ export default function CalendarScreen() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  useEffect(() => {
+    const unsubscribe = transactionEvents.subscribe(() => {
+      loadData();
+    });
+
+    return unsubscribe;
+  }, [loadData]);
+
   const lastDay = getDaysInMonth(month, year);
   const paddedMonth = String(month).padStart(2, '0');
-  const dateRange = `${month}/${year}(01/${paddedMonth}-${lastDay}/${month})`;
-
-  const handlePrevMonth = () => {
-    if (month === 1) { setMonth(12); setYear(year - 1); }
-    else setMonth(month - 1);
-  };
-  const handleNextMonth = () => {
-    if (month === 12) { setMonth(1); setYear(year + 1); }
-    else setMonth(month + 1);
-  };
+  const dateRange = `${month}/${year} (01/${paddedMonth}-${lastDay}/${month})`;
 
   const weeks = [];
   for (let i = 0; i < calendarDays.length; i += 7) weeks.push(calendarDays.slice(i, i + 7));
@@ -156,11 +144,9 @@ export default function CalendarScreen() {
     const DOUBLE_TAP_DELAY = 300;
     
     if (lastTap && (now - lastTap) < DOUBLE_TAP_DELAY) {
-      // Double tap: Open Quick Add
       setSelectedDate(date);
       setIsModalVisible(true);
     } else {
-      // Single tap: Focus on date
       setFocusedDate(focusedDate === date ? null : date);
       setLastTap(now);
     }
@@ -179,64 +165,69 @@ export default function CalendarScreen() {
     : historyGroups;
 
   return (
-    <View style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <Text style={styles.title}>Lịch sử</Text>
+    <View className="flex-1 bg-background">
+      <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 50 }} showsVerticalScrollIndicator={false}>
+        <Text className="text-3xl font-bold text-white mb-6">Lịch sử</Text>
 
-        <GlassBox padding={10} intensity={30} style={styles.monthSelectorOuter}>
+        <GlassBox padding={10} intensity={30} className="mb-4">
           <TouchableOpacity 
-            style={styles.monthSelector} 
-            onPress={() => {
-              setPickerMonth(month);
-              setPickerYear(year);
-              setIsPickerVisible(true);
-            }}
+            className="flex-row items-center justify-center gap-x-4" 
+            onPress={() => setIsPickerVisible(true)}
           >
-            <Ionicons name="calendar-outline" size={18} color={Colors.accentBlue} style={{ marginRight: 8 }} />
-            <Text style={styles.monthLabel}>{dateRange}</Text>
-            <Ionicons name="chevron-down" size={16} color={Colors.textTertiary} style={{ marginLeft: 4 }} />
+            <Ionicons name="calendar-outline" size={18} color="#00B0FF" />
+            <Text className="text-base font-bold text-white">{dateRange}</Text>
+            <Ionicons name="chevron-down" size={16} color="#999" />
           </TouchableOpacity>
         </GlassBox>
 
-        <View style={styles.summaryRow}>
-          <GlassBox style={styles.summaryTile} padding={10}>
-            <Text style={styles.sumLabel}>Thu nhập</Text>
-            <Text style={[styles.sumValue, { color: Colors.accentIncome }]}>+{totalIncome.toLocaleString()}đ</Text>
+        <View className="flex-row gap-4 mb-4">
+          <GlassBox className="flex-1 h-[70px] justify-center" padding={10}>
+            <Text className="text-[10px] text-gray-400">Thu nhập</Text>
+            <Text className="text-lg font-bold text-income">+{totalIncome.toLocaleString()}đ</Text>
           </GlassBox>
-          <GlassBox style={styles.summaryTile} padding={10}>
-            <Text style={styles.sumLabel}>Chi tiêu</Text>
-            <Text style={[styles.sumValue, { color: Colors.accentExpense }]}>-{totalExpense.toLocaleString()}đ</Text>
+          <GlassBox className="flex-1 h-[70px] justify-center" padding={10}>
+            <Text className="text-[10px] text-gray-400">Chi tiêu</Text>
+            <Text className="text-lg font-bold text-expense">-{totalExpense.toLocaleString()}đ</Text>
           </GlassBox>
         </View>
 
-        <GlassBox style={styles.calendarCard} padding={8}>
-          <View style={styles.dayHeaderRow}>
+        <GlassBox className="mb-6 rounded-2xl" padding={8}>
+          <View className="flex-row mb-1.5">
             {dayHeaders.map((d, i) => (
-              <Text key={d} style={[styles.dayHeaderText, i === 0 && { color: Colors.accentExpense }, i === 6 && { color: Colors.accentBlue }]}>{d}</Text>
+              <Text key={d} className={`flex-1 text-center text-[10px] font-bold ${i === 0 ? 'text-expense' : i === 6 ? 'text-accent' : 'text-gray-500'}`}>{d}</Text>
             ))}
           </View>
           {weeks.map((week, wi) => (
-            <View key={wi} style={styles.weekRow}>
+            <View key={wi} style={{ flexDirection: 'row' }}>
               {week.map((day, di) => (
                 <TouchableOpacity 
                   key={di} 
                   style={[
-                    styles.dayCell, 
-                    day.isToday && styles.todayCell,
-                    focusedDate === day.date && styles.focusedCell
+                    { 
+                      flex: 1, 
+                      aspectRatio: 1, 
+                      alignItems: 'center', 
+                      justifyContent: 'center', 
+                      borderRadius: 12,
+                      margin: 2
+                    },
+                    day.isToday && { backgroundColor: 'rgba(255,255,255,0.1)', borderWidth: 1, borderColor: Colors.accentBlue + '44' },
+                    focusedDate === day.date && { borderWidth: 2, borderColor: Colors.accentBlue, backgroundColor: 'transparent' }
                   ]}
                   onPress={() => handleDayPress(day.date)}
                   activeOpacity={0.7}
                 >
                   <Text style={[
-                    styles.dayText, 
-                    !day.isCurrentMonth && styles.otherMonthText, 
-                    day.isToday && styles.todayText,
-                    focusedDate === day.date && { color: Colors.white, fontWeight: '700' }
-                  ]}>{day.day}</Text>
-                  <View style={styles.indicatorRow}>
-                    {day.income > 0 && <View style={[styles.dot, { backgroundColor: Colors.accentIncome }]} />}
-                    {day.expense > 0 && <View style={[styles.dot, { backgroundColor: Colors.accentExpense }]} />}
+                    { fontSize: 12, color: Colors.white },
+                    !day.isCurrentMonth && { opacity: 0.2 },
+                    day.isToday && { fontWeight: 'bold', color: Colors.accentBlue },
+                    focusedDate === day.date && { color: Colors.white, fontWeight: 'bold' }
+                  ]}>
+                    {day.day}
+                  </Text>
+                  <View style={{ flexDirection: 'row', marginTop: 2, height: 3 }}>
+                    {day.income > 0 && <View style={{ width: 3, height: 3, borderRadius: 1.5, backgroundColor: Colors.accentIncome, marginRight: 2 }} />}
+                    {day.expense > 0 && <View style={{ width: 3, height: 3, borderRadius: 1.5, backgroundColor: Colors.accentExpense }} />}
                   </View>
                 </TouchableOpacity>
               ))}
@@ -244,46 +235,46 @@ export default function CalendarScreen() {
           ))}
         </GlassBox>
 
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>
+        <View className="flex-row justify-between items-center mb-2">
+          <Text className="text-xl font-bold text-white">
             {focusedDate ? `Ngày ${focusedDate.split('/')[0]}/${focusedDate.split('/')[1]}` : 'Trong tháng'}
           </Text>
           {focusedDate && (
             <TouchableOpacity onPress={() => setFocusedDate(null)}>
-              <Text style={styles.clearFilter}>Hiện tất cả</Text>
+              <Text className="text-xs font-bold text-accent">Hiện tất cả</Text>
             </TouchableOpacity>
           )}
         </View>
 
         {filteredGroups.length === 0 ? (
-          <View style={styles.emptyContainer}>
+          <View className="items-center justify-center py-10">
             <Ionicons name="receipt-outline" size={48} color="rgba(255,255,255,0.05)" />
-            <Text style={styles.emptyText}>Không có giao dịch nào</Text>
+            <Text className="text-sm text-gray-500 mt-2.5">Không có giao dịch nào</Text>
           </View>
         ) : (
           filteredGroups.map((group) => (
-          <View key={group.title} style={styles.groupContainer}>
-            <View style={styles.groupHeader}>
-              <Text style={styles.groupDate}>{group.title}</Text>
-              <Text style={[styles.groupTotal, { color: group.total >= 0 ? Colors.accentIncome : Colors.accentExpense }]}>
+          <View key={group.title} className="mb-6">
+            <View className="flex-row justify-between mb-1">
+              <Text className="text-xs font-bold text-gray-400">{group.title}</Text>
+              <Text className={`text-xs font-bold ${group.total >= 0 ? 'text-income' : 'text-expense'}`}>
                 {group.total >= 0 ? '+' : ''}{group.total.toLocaleString()}đ
               </Text>
             </View>
             {group.data.map((item, idx) => (
-              <GlassBox key={idx} style={styles.txItem} padding={10} intensity={10}>
-                <View style={styles.txRow}>
-                  <View style={[styles.catIcon, { backgroundColor: item.type === 1 ? 'rgba(0, 230, 118, 0.1)' : 'rgba(255, 82, 82, 0.1)' }]}>
-                    <Text style={{ fontSize: 16 }}>{getCategoryEmoji(item.category)}</Text>
+              <GlassBox key={idx} className="mb-1" padding={10} intensity={10}>
+                <View className="flex-row items-center">
+                  <View className="w-9 h-9 items-center justify-center mr-2">
+                    <Text className="text-xl">{getCategoryEmoji(item.category)}</Text>
                   </View>
-                  <View style={styles.txInfo}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                      <Text style={styles.txCatName}>{item.category}</Text>
+                  <View className="flex-1">
+                    <View className="flex-row items-center">
+                      <Text className="text-lg font-bold text-white">{item.category}</Text>
                       {item.is_synced === 0 && (
-                        <CloudOff size={10} color={Colors.textTertiary} style={{ marginLeft: 6 }} />
+                        <CloudOff size={10} color="#999" className="ml-1.5" />
                       )}
                     </View>
                   </View>
-                  <Text style={[styles.txAmount, { color: item.type === 1 ? Colors.accentIncome : Colors.accentExpense }]}>
+                  <Text className={`text-lg font-bold ${item.type === 1 ? 'text-income' : 'text-expense'}`}>
                     {item.type === 1 ? '+' : '-'}{item.amount.toLocaleString()}đ
                   </Text>
                 </View>
@@ -291,7 +282,7 @@ export default function CalendarScreen() {
             ))}
           </View>
         )))}
-        <View style={{ height: 100 }} />
+        <View className="h-[100px]" />
       </ScrollView>
 
       <QuickAddModal
@@ -314,45 +305,3 @@ export default function CalendarScreen() {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.bg },
-  scrollContent: { paddingHorizontal: Spacing.xl, paddingTop: 50 },
-  title: { fontSize: FontSize.xxxl, fontWeight: '600', color: Colors.textPrimary, marginBottom: Spacing.lg },
-  monthSelectorOuter: { marginBottom: Spacing.md },
-  monthSelector: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: Spacing.md },
-  monthLabel: { fontSize: FontSize.md, fontWeight: '700', color: Colors.textPrimary },
-  summaryRow: { flexDirection: 'row', gap: Spacing.md, marginBottom: Spacing.md },
-  summaryTile: { flex: 1, height: 70, justifyContent: 'center' },
-  sumLabel: { fontSize: FontSize.xs, color: Colors.textSecondary },
-  sumValue: { fontSize: FontSize.lg, fontWeight: '600' },
-  calendarCard: { marginBottom: Spacing.lg },
-  dayHeaderRow: { flexDirection: 'row', marginBottom: 6 },
-  dayHeaderText: { flex: 1, textAlign: 'center', fontSize: 10, fontWeight: '700', color: Colors.textTertiary },
-  weekRow: { flexDirection: 'row' },
-  dayCell: { flex: 1, aspectRatio: 1, alignItems: 'center', justifyContent: 'center', borderRadius: 8 },
-  todayCell: { backgroundColor: 'rgba(255, 255, 255, 0.08)', borderWidth: 0.5, borderColor: Colors.accentBlue },
-  focusedCell: { backgroundColor: Colors.accentBlue, shadowColor: Colors.accentBlue, shadowOpacity: 0.5, shadowRadius: 10, elevation: 5 },
-  dayText: { fontSize: 12, color: Colors.textPrimary },
-  otherMonthText: { opacity: 0.2 },
-  todayText: { fontWeight: '700', color: Colors.accentBlue },
-  indicatorRow: { flexDirection: 'row', gap: 2, marginTop: 2, height: 3 },
-  dot: { width: 3, height: 3, borderRadius: 1.5 },
-  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: Spacing.sm },
-  sectionTitle: { fontSize: FontSize.xl, fontWeight: '600', color: Colors.textPrimary },
-  clearFilter: { fontSize: FontSize.xs, color: Colors.accentBlue, fontWeight: '600' },
-  emptyContainer: { alignItems: 'center', justifyContent: 'center', paddingVertical: 40 },
-  emptyText: { color: Colors.textTertiary, fontSize: FontSize.sm, marginTop: 10 },
-  groupContainer: { marginBottom: Spacing.lg },
-  groupHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
-  groupDate: { fontSize: 12, fontWeight: '600', color: Colors.textSecondary },
-  groupTotal: { fontSize: 12, fontWeight: '600' },
-  txItem: { marginBottom: 4 },
-  txRow: { flexDirection: 'row', alignItems: 'center' },
-  catIcon: { width: 34, height: 34, borderRadius: 8, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
-  txInfo: { flex: 1 },
-  txCatName: { fontSize: FontSize.lg, fontWeight: '600', color: Colors.textPrimary },
-  txAmount: { fontSize: FontSize.lg, fontWeight: '600' },
-
-  pickerApplyText: { color: Colors.white, fontWeight: '700', fontSize: FontSize.md },
-});

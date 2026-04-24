@@ -2,24 +2,24 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   ScrollView,
   Dimensions,
   TouchableOpacity,
   RefreshControl,
 } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import { Colors, Spacing, BorderRadius, FontSize } from '../../theme/colors';
+import { Colors } from '../../theme/colors';
 import GlassBox from '../../components/GlassBox';
 import SummaryCard from '../../components/SummaryCard';
 import db from '../../database/DatabaseHelper';
 import { Transaction } from '../../models/Transaction';
 import { Ionicons } from '@expo/vector-icons';
-import { LineChart } from 'react-native-gifted-charts';
+import { LineChart, BarChart } from 'react-native-gifted-charts';
 import { getCategoryEmoji } from '../../config/categories';
 import { BlurView } from 'expo-blur';
 import { CloudOff } from 'lucide-react-native';
 import UniversalDatePicker from '../../components/UniversalDatePicker';
+import { transactionEvents } from '../../services/TransactionEvents';
 
 const { width } = Dimensions.get('window');
 
@@ -27,13 +27,16 @@ export default function DashboardScreen() {
   const navigation = useNavigation<any>();
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
-  
+
   const [totalBalance, setTotalBalance] = useState(0);
   const [periodBalance, setPeriodBalance] = useState(0);
   const [monthlyIncome, setMonthlyIncome] = useState(0);
   const [monthlyExpense, setMonthlyExpense] = useState(0);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [chartData, setChartData] = useState<any[]>([]);
+  const [chartMax, setChartMax] = useState(1000);
+  const [chartMin, setChartMin] = useState(0);
+  const [avgValue, setAvgValue] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isPickerVisible, setIsPickerVisible] = useState(false);
 
@@ -61,10 +64,24 @@ export default function DashboardScreen() {
       }
 
       const summaries = await db.getDailySummariesInRange(dates);
+      const rawValues = summaries.map(s => s.income - s.expense);
+      const absValues = rawValues.map(v => Math.abs(v));
+      const maxAbs = Math.max(...absValues, 100000);
+      const avg = absValues.reduce((a, b) => a + b, 0) / 7;
+
+      setChartMax(maxAbs * 1.3);
+      setChartMin(0); // Always baseline 0 for absolute bar chart
+      setAvgValue(avg);
+
       const formattedChartData = summaries.map((s) => ({
-        value: s.income - s.expense,
+        value: Math.abs(s.income - s.expense),
+        realValue: s.income - s.expense,
         label: s.date.split('/')[0],
         fullDate: s.date,
+        frontColor: (s.income - s.expense) >= 0 ? '#00B0FF' : '#FF5252',
+        barBorderColor: 'white',
+        barBorderWidth: 1.5,
+        topLabelComponent: () => null,
       }));
       setChartData(formattedChartData);
     } catch (error) {
@@ -77,6 +94,14 @@ export default function DashboardScreen() {
       fetchData(selectedMonth, selectedYear);
     }, [fetchData, selectedMonth, selectedYear])
   );
+
+  useEffect(() => {
+    const unsubscribe = transactionEvents.subscribe(() => {
+      fetchData(selectedMonth, selectedYear);
+    });
+
+    return unsubscribe;
+  }, [fetchData, selectedMonth, selectedYear]);
 
   const onRefresh = async () => {
     setIsRefreshing(true);
@@ -103,24 +128,24 @@ export default function DashboardScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <View className="flex-1 bg-background">
       <ScrollView
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 50 }}
         refreshControl={
-          <RefreshControl refreshing={isRefreshing} onRefresh={onRefresh} tintColor={Colors.white} />
+          <RefreshControl refreshing={isRefreshing} onRefresh={onRefresh} tintColor="#FFF" />
         }
       >
-        <View style={styles.header}>
+        <View className="flex-row justify-between items-center mb-6">
           <View>
-            <Text style={styles.greeting}>Xin chào,</Text>
-            <Text style={styles.userName}>Sổ Thu Chi</Text>
+            <Text className="text-xs text-gray-400 font-medium">Xin chào,</Text>
+            <Text className="text-3xl font-bold text-white">Sổ Thu Chi</Text>
           </View>
         </View>
 
-        <View style={styles.bentoContainer}>
+        <View className="gap-y-4">
           {/* Enhanced Summary Card Component */}
-          <SummaryCard 
+          <SummaryCard
             totalBalance={totalBalance}
             periodBalance={periodBalance}
             month={selectedMonth}
@@ -130,7 +155,7 @@ export default function DashboardScreen() {
             onDatePress={() => setIsPickerVisible(true)}
           />
 
-          <UniversalDatePicker 
+          <UniversalDatePicker
             isVisible={isPickerVisible}
             currentMonth={selectedMonth}
             currentYear={selectedYear}
@@ -142,133 +167,111 @@ export default function DashboardScreen() {
             }}
           />
 
-          <View style={styles.row}>
-            <GlassBox style={styles.halfTile} padding={10}>
-              <View style={[styles.tileIconContainer, { backgroundColor: 'rgba(0, 230, 118, 0.08)' }]}>
-                <Ionicons name="trending-up" size={14} color={Colors.accentIncome} />
+          <View className="flex-row gap-x-4">
+            <GlassBox className="flex-1 h-[90px] justify-between" padding={12}>
+              <View className="w-6 h-6 rounded-md bg-income/10 items-center justify-center mb-1">
+                <Ionicons name="trending-up" size={14} color="#00E676" />
               </View>
-              <Text style={styles.miniLabel}>Thu nhập</Text>
-              <Text style={[styles.miniAmount, { color: Colors.accentIncome }]} numberOfLines={1}>
+              <Text className="text-xs text-gray-400">Thu nhập</Text>
+              <Text className="text-lg font-bold text-income" numberOfLines={1}>
                 +{monthlyIncome.toLocaleString()}
               </Text>
             </GlassBox>
-            <GlassBox style={styles.halfTile} padding={10}>
-              <View style={[styles.tileIconContainer, { backgroundColor: 'rgba(255, 82, 82, 0.08)' }]}>
-                <Ionicons name="trending-down" size={14} color={Colors.accentExpense} />
+            <GlassBox className="flex-1 h-[90px] justify-between" padding={12}>
+              <View className="w-6 h-6 rounded-md bg-expense/10 items-center justify-center mb-1">
+                <Ionicons name="trending-down" size={14} color="#FF5252" />
               </View>
-              <Text style={styles.miniLabel}>Đã chi</Text>
-              <Text style={[styles.miniAmount, { color: Colors.accentExpense }]} numberOfLines={1}>
+              <Text className="text-xs text-gray-400">Đã chi</Text>
+              <Text className="text-lg font-bold text-expense" numberOfLines={1}>
                 -{monthlyExpense.toLocaleString()}
               </Text>
             </GlassBox>
           </View>
 
-          <GlassBox style={styles.chartTile} padding={10}>
-            <Text style={[styles.tileLabel, { color: Colors.textPrimary }]}>Xu hướng 7 ngày</Text>
-            <View style={styles.chartContainer}>
+          <GlassBox className="h-[200px]" padding={12}>
+            <Text className="text-sm font-bold text-white mb-2">Xu hướng 7 ngày</Text>
+            <View className="items-center -ml-6">
               {chartData.length > 0 && (
-                <LineChart
-                  data={chartData} width={width - 72} height={100} noOfSections={3} color={Colors.accentBlue} thickness={2}
-                  startFillColor="rgba(0, 176, 255, 0.2)" endFillColor="rgba(0, 176, 255, 0.01)" startOpacity={0.3}
-                  spacing={48}
-                  rulesType="none"
-                  yAxisTextStyle={{ color: Colors.textTertiary, fontSize: 8 }}
-                  xAxisLabelTextStyle={{ color: Colors.textTertiary, fontSize: 8 }}
-                  hideDataPoints={false}
-                  dataPointsColor={Colors.accentBlue}
-                  dataPointsRadius={4}
-                  curved
-                  pointerConfig={{
-                    pointerStripUptoDataPoint: true,
-                    pointerStripColor: 'rgba(255, 255, 255, 0.4)',
-                    pointerStripWidth: 1,
-                    strokeDashArray: [2, 4],
-                    pointerColor: Colors.accentBlue,
-                    radius: 5,
-                    pointerLabelWidth: 100,
-                    pointerLabelHeight: 45,
-                    autoAdjustPointerLabelPosition: true,
-                    persistPointer: true,
-                    pointerVanishDelay: 0,
-                    shiftPointerLabelX: -40,
-                    shiftPointerLabelY: -35,
-                    pointerLabelComponent: (items: any) => (
-                      <View style={styles.tooltipContainer}>
-                        <BlurView intensity={60} tint="dark" style={styles.tooltipBlur}>
-                          <Text style={styles.tooltipDate}>{items[0].fullDate}</Text>
-                          <Text style={[styles.tooltipVal, { color: items[0].value >= 0 ? Colors.accentIncome : Colors.accentExpense }]}>
-                            {items[0].value >= 0 ? '+' : ''}{items[0].value.toLocaleString()}đ
-                          </Text>
-                        </BlurView>
-                      </View>
-                    ),
+                <BarChart
+                  data={chartData}
+                  width={width - 80}
+                  height={150}
+                  noOfSections={4}
+                  barWidth={22}
+                  spacing={18}
+                  roundedTop
+                  roundedBottom
+                  barBorderWidth={1.5}
+                  barBorderColor="white"
+                  hideRules
+                  xAxisThickness={0}
+                  yAxisThickness={0}
+                  yAxisLabelWidth={45}
+                  maxValue={chartMax}
+                  mostNegativeValue={0}
+                  showReferenceLine1={true}
+                  referenceLine1Position={avgValue}
+                  referenceLine1Config={{
+                    color: 'rgba(255, 255, 255, 0.5)',
+                    thickness: 1,
+                    dashWidth: 5,
+                    dashGap: 5,
                   }}
+                  formatYLabel={(label) => {
+                    const val = parseInt(label);
+                    if (Math.abs(val) >= 1000000) return `${(val / 1000000).toFixed(1)}M`;
+                    if (Math.abs(val) >= 1000) return `${(val / 1000).toFixed(0)}k`;
+                    return label;
+                  }}
+                  yAxisTextStyle={{ color: '#999', fontSize: 9 }}
+                  xAxisLabelTextStyle={{ color: '#999', fontSize: 9 }}
+                  isAnimated
+                  renderTooltip={(item: any) => (
+                    <View className="absolute -top-12 -left-10 z-50">
+                      <BlurView intensity={90} tint="dark" className="p-2 rounded-xl border-[0.5px] border-white/30 min-w-[95px] items-center">
+                        <Text className="text-[10px] text-gray-300 mb-0.5">{item.fullDate}</Text>
+                        <Text className={`text-[12px] font-bold ${item.realValue >= 0 ? 'text-income' : 'text-expense'}`}>
+                          {item.realValue >= 0 ? '+' : ''}{item.realValue.toLocaleString()}đ
+                        </Text>
+                      </BlurView>
+                    </View>
+                  )}
                 />
               )}
             </View>
           </GlassBox>
 
-          <View style={styles.listHeader}>
-            <Text style={styles.sectionTitle}>Gần đây (7)</Text>
+          <View className="flex-row justify-between items-center mt-2 mb-1">
+            <Text className="text-xl font-bold text-white">Gần đây (7)</Text>
             <TouchableOpacity onPress={() => navigation.navigate('Calendar')}>
-              <Text style={styles.seeAll}>Tất cả</Text>
+              <Text className="text-xs font-bold text-accent">Tất cả</Text>
             </TouchableOpacity>
           </View>
 
           {recentTransactions.map((item, index) => (
-            <GlassBox key={item.id?.toString() || index.toString()} style={styles.transactionItem} padding={10} intensity={20}>
-              <View style={styles.txRow}>
-                <View style={[styles.categoryIcon, { backgroundColor: item.type === 1 ? 'rgba(0, 230, 118, 0.1)' : 'rgba(255, 82, 82, 0.1)' }]}>
-                  <Text style={{ fontSize: 16 }}>{getCategoryEmoji(item.category)}</Text>
+            <GlassBox key={item.id?.toString() || index.toString()} className="mb-0.5" padding={10} intensity={25}>
+              <View className="flex-row items-center">
+                <View className="w-9 h-9 items-center justify-center mr-2">
+                  <Text className="text-xl">{getCategoryEmoji(item.category)}</Text>
                 </View>
-                <View style={styles.txInfo}>
-                  <Text style={styles.txCategory}>{item.category}</Text>
-                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                    <Text style={styles.txDate}>{item.date}</Text>
+                <View className="flex-1">
+                  <Text className="text-lg font-bold text-white">{item.category}</Text>
+                  <View className="flex-row items-center">
+                    <Text className="text-xs text-gray-400">{item.date}</Text>
                     {item.is_synced === 0 && (
-                      <CloudOff size={10} color={Colors.textTertiary} style={{ marginLeft: 6 }} />
+                      <CloudOff size={10} color="#999" className="ml-1.5" />
                     )}
                   </View>
                 </View>
-                <Text style={[styles.txAmount, { color: item.type === 1 ? Colors.accentIncome : Colors.accentExpense }]}>
+                <Text className={`text-lg font-bold ${item.type === 1 ? 'text-income' : 'text-expense'}`}>
                   {item.type === 1 ? '+' : '-'}{item.amount.toLocaleString()}đ
                 </Text>
               </View>
             </GlassBox>
           ))}
         </View>
-        <View style={{ height: 100 }} />
+        <View className="h-[100px]" />
       </ScrollView>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.bg },
-  scrollContent: { paddingHorizontal: Spacing.xl, paddingTop: 50 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: Spacing.lg },
-  greeting: { fontSize: FontSize.xs, color: Colors.textSecondary, fontWeight: '500' },
-  userName: { fontSize: FontSize.xxxl, fontWeight: '600', color: Colors.textPrimary },
-  bentoContainer: { gap: Spacing.md },
-  row: { flexDirection: 'row', gap: Spacing.md },
-  halfTile: { flex: 1, height: 90, justifyContent: 'space-between' },
-  tileIconContainer: { width: 24, height: 24, borderRadius: 6, alignItems: 'center', justifyContent: 'center', marginBottom: 4 },
-  miniLabel: { fontSize: FontSize.xs, color: Colors.textSecondary, marginBottom: 2 },
-  miniAmount: { fontSize: FontSize.lg, fontWeight: '600' },
-  chartTile: { height: 160 },
-  chartContainer: { marginTop: 10, alignItems: 'center', marginLeft: -25 },
-  tooltipContainer: { justifyContent: 'center', alignItems: 'center' },
-  tooltipBlur: { padding: 6, borderRadius: 8, borderWidth: 0.5, borderColor: 'rgba(255, 255, 255, 0.2)', minWidth: 80, alignItems: 'center' },
-  tooltipDate: { fontSize: 8, color: Colors.textTertiary, marginBottom: 2 },
-  tooltipVal: { fontSize: 10, fontWeight: '700' },
-  listHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: Spacing.sm, marginBottom: 2 },
-  sectionTitle: { fontSize: FontSize.xl, fontWeight: '600', color: Colors.textPrimary },
-  seeAll: { fontSize: FontSize.xs, color: Colors.accentBlue, fontWeight: '600' },
-  transactionItem: { marginBottom: 2 },
-  txRow: { flexDirection: 'row', alignItems: 'center' },
-  categoryIcon: { width: 34, height: 34, borderRadius: 8, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
-  txInfo: { flex: 1 },
-  txCategory: { fontSize: FontSize.lg, fontWeight: '600', color: Colors.textPrimary },
-  txDate: { fontSize: FontSize.xs, color: Colors.textTertiary },
-  txAmount: { fontSize: FontSize.lg, fontWeight: '600' },
-});

@@ -2,13 +2,12 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   ScrollView,
   TouchableOpacity,
   Dimensions,
   ActivityIndicator,
 } from 'react-native';
-import { Colors, Spacing, BorderRadius, FontSize } from '../../theme/colors';
+import { Colors } from '../../theme/colors';
 import GlassBox from '../../components/GlassBox';
 import db from '../../database/DatabaseHelper';
 import { Transaction } from '../../models/Transaction';
@@ -17,6 +16,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { PanResponder, Animated, Easing } from 'react-native';
 import UniversalDatePicker from '../../components/UniversalDatePicker';
+import { transactionEvents } from '../../services/TransactionEvents';
 
 const { width } = Dimensions.get('window');
 
@@ -30,7 +30,9 @@ interface ReportCategory {
   amount: number;
   percentage: number;
   color: string;
-}export default function ReportScreen() {
+}
+
+export default function ReportScreen() {
   const [period, setPeriod] = useState(0);
   const [type, setType] = useState(0);
   const [month, setMonth] = useState(new Date().getMonth() + 1);
@@ -38,7 +40,6 @@ interface ReportCategory {
   const [totalIncome, setTotalIncome] = useState(0);
   const [totalExpense, setTotalExpense] = useState(0);
   const [categories, setCategories] = useState<ReportCategory[]>([]);
-  const [displayCategories, setDisplayCategories] = useState<ReportCategory[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<ReportCategory | null>(null);
   const [isPickerVisible, setIsPickerVisible] = useState(false);
@@ -47,25 +48,23 @@ interface ReportCategory {
   const scaleAnim = useRef(new Animated.Value(0.85)).current;
   const [sweepProgress, setSweepProgress] = useState(0);
 
-  // Manual Sweep Animation Logic with "Flowing" feel
   useEffect(() => {
     if (renderChart) {
       const listenerId = sweepAnim.addListener(({ value }) => {
         setSweepProgress(value);
       });
 
-      // Parallel animations for "Glidng" effect
       Animated.parallel([
         Animated.timing(sweepAnim, {
           toValue: 1,
-          duration: 2500, // Longer for a gliding feel
-          easing: Easing.bezier(0.4, 0, 0.2, 1), // Standard smooth ease-in-out
-          useNativeDriver: false, // Must be false due to addListener
+          duration: 2500,
+          easing: Easing.bezier(0.4, 0, 0.2, 1),
+          useNativeDriver: false,
         }),
         Animated.timing(scaleAnim, {
           toValue: 1,
           duration: 2200,
-          easing: Easing.out(Easing.back(1.5)), // Subtle bounce at the end
+          easing: Easing.out(Easing.back(1.5)),
           useNativeDriver: false,
         })
       ]).start();
@@ -74,10 +73,8 @@ interface ReportCategory {
     }
   }, [renderChart]);
 
-  // Step-Data Logic: Transition from unmounted to mounted
   useEffect(() => {
     if (!isLoading && categories.length > 0) {
-      // PRE-RESET: Reset values BEFORE mounting to avoid flickering previous states
       sweepAnim.setValue(0);
       scaleAnim.setValue(0.85);
       setSweepProgress(0);
@@ -85,13 +82,13 @@ interface ReportCategory {
 
       const timer = setTimeout(() => {
         setRenderChart(true);
-      }, 150); // Shorter delay but with clean reset
+      }, 150);
       return () => clearTimeout(timer);
     } else {
       setRenderChart(false);
     }
   }, [isLoading, categories, type, month, year]);
-  // Rotation Animation
+
   const rotation = useRef(new Animated.Value(0)).current;
   const lastAngle = useRef(0);
   const rotationValue = useRef(0);
@@ -152,7 +149,6 @@ interface ReportCategory {
         const { pageX, pageY } = evt.nativeEvent;
         const { angle, distance } = getAngleInfo(pageX, pageY);
         
-        // Dead-zone: If too close to center, rotation calculations become unstable
         if (distance < 30) return; 
 
         let delta = angle - lastAngle.current;
@@ -167,8 +163,8 @@ interface ReportCategory {
         const velocity = (Math.abs(gestureState.vx) + Math.abs(gestureState.vy)) / 2;
         if (velocity > 0.02) {
           Animated.decay(rotation, {
-            velocity: velocity * 0.5, // Much faster spin
-            deceleration: 0.998, // Very low friction (spin for a long time)
+            velocity: velocity * 0.5,
+            deceleration: 0.998,
             useNativeDriver: true,
           }).start();
         }
@@ -216,8 +212,16 @@ interface ReportCategory {
   }, [period, type, month, year]);
 
   useEffect(() => {
-    setSelectedCategory(null); // Reset selection on period/type change
+    setSelectedCategory(null);
     loadData();
+  }, [loadData]);
+
+  useEffect(() => {
+    const unsubscribe = transactionEvents.subscribe(() => {
+      loadData();
+    });
+
+    return unsubscribe;
   }, [loadData]);
 
   const dateText = period === 0 ? `${month}/${year}` : period === 1 ? `${year}` : 'Tất cả';
@@ -239,7 +243,7 @@ interface ReportCategory {
   const totalAmount = categories.reduce((s, c) => s + c.amount, 0);
   let currentLimit = totalAmount * sweepProgress;
 
-  const pieData = categories.map((cat, index) => {
+  const pieData = categories.map((cat) => {
     const val = Math.min(cat.amount, Math.max(0, currentLimit));
     currentLimit -= val;
     
@@ -254,33 +258,33 @@ interface ReportCategory {
   });
 
   return (
-    <View style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <Text style={styles.title}>Báo cáo</Text>
+    <View className="flex-1 bg-background">
+      <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 50 }} showsVerticalScrollIndicator={false}>
+        <Text className="text-3xl font-bold text-white mb-6">Báo cáo</Text>
 
-        <View style={styles.periodRow}>
+        <View className="flex-row bg-white/5 rounded-2xl p-1 mb-4">
           {[{ id: 0, label: 'Tháng' }, { id: 1, label: 'Năm' }, { id: 2, label: 'Tất cả' }].map(p => (
             <TouchableOpacity
               key={p.id}
-              style={[styles.periodBtn, period === p.id && styles.periodBtnActive]}
+              className={`flex-1 h-9 rounded-xl items-center justify-center ${period === p.id ? 'bg-accent' : ''}`}
               onPress={() => setPeriod(p.id)}
             >
-              <Text style={[styles.periodBtnText, period === p.id && styles.periodBtnTextActive]}>{p.label}</Text>
+              <Text className={`text-xs font-bold ${period === p.id ? 'text-white' : 'text-gray-400'}`}>{p.label}</Text>
             </TouchableOpacity>
           ))}
         </View>
 
         {period < 2 && (
-          <GlassBox padding={8} intensity={20} style={styles.datePickerOuter}>
-            <View style={styles.datePicker}>
-              <TouchableOpacity onPress={handlePrev} style={styles.dateNavBtn}>
-                <Ionicons name="chevron-back" size={20} color={Colors.textPrimary} />
+          <GlassBox padding={10} intensity={20} className="mb-4">
+            <View className="flex-row items-center justify-center gap-x-6">
+              <TouchableOpacity onPress={handlePrev} className="p-1">
+                <Ionicons name="chevron-back" size={20} color="#FFF" />
               </TouchableOpacity>
-              <TouchableOpacity onPress={() => setIsPickerVisible(true)} style={styles.dateCenter}>
-                <Text style={styles.dateValue}>{dateText}</Text>
+              <TouchableOpacity onPress={() => setIsPickerVisible(true)}>
+                <Text className="text-lg font-bold text-white">{dateText}</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={handleNext} style={styles.dateNavBtn}>
-                <Ionicons name="chevron-forward" size={20} color={Colors.textPrimary} />
+              <TouchableOpacity onPress={handleNext} className="p-1">
+                <Ionicons name="chevron-forward" size={20} color="#FFF" />
               </TouchableOpacity>
             </View>
           </GlassBox>
@@ -298,25 +302,32 @@ interface ReportCategory {
           }}
         />
 
-        <View style={styles.typeSwitcher}>
-          <TouchableOpacity style={[styles.typeBtn, type === 0 && styles.typeBtnActiveExpense]} onPress={() => setType(0)}>
-            <Text style={[styles.typeBtnText, type === 0 && styles.typeBtnTextActive]}>CHI TIÊU</Text>
+        <View className="flex-row bg-white/5 rounded-2xl p-1 mb-6">
+          <TouchableOpacity 
+            className={`flex-1 py-2 items-center rounded-xl ${type === 0 ? 'bg-expense' : ''}`} 
+            onPress={() => setType(0)}
+          >
+            <Text className={`text-[10px] font-extrabold ${type === 0 ? 'text-white' : 'text-gray-400'}`}>CHI TIÊU</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.typeBtn, type === 1 && styles.typeBtnActiveIncome]} onPress={() => setType(1)}>
-            <Text style={[styles.typeBtnText, type === 1 && styles.typeBtnTextActive]}>THU NHẬP</Text>
+          <TouchableOpacity 
+            className={`flex-1 py-2 items-center rounded-xl ${type === 1 ? 'bg-income' : ''}`} 
+            onPress={() => setType(1)}
+          >
+            <Text className={`text-[10px] font-extrabold ${type === 1 ? 'text-white' : 'text-gray-400'}`}>THU NHẬP</Text>
           </TouchableOpacity>
         </View>
 
-        <GlassBox style={styles.chartBox} padding={12}>
+        <GlassBox className="min-h-[260px] justify-center items-center mb-6" padding={12}>
           {isLoading ? (
-            <ActivityIndicator color={Colors.accentBlue} />
+            <ActivityIndicator color="#00B0FF" />
           ) : categories.length > 0 ? (
             <Animated.View 
               ref={panRef}
               onLayout={onChartLayout}
               style={[
-                styles.chartInner, 
                 { 
+                  alignItems: 'center', 
+                  justifyContent: 'center',
                   transform: [
                     { rotate: rotation.interpolate({ inputRange: [0, 360], outputRange: ['0deg', '360deg'] }) },
                     { scale: scaleAnim }
@@ -328,7 +339,6 @@ interface ReportCategory {
             >
               {renderChart ? (
                 <PieChart
-                    animate={false}
                     initialAngle={-90}
                     donut
                     showText
@@ -339,7 +349,6 @@ interface ReportCategory {
                     data={pieData}
                     focusOnPress
                     toggleFocusOnPress={false}
-                    extraRadiusForFocus={10}
                     onPress={(item: any) => {
                       if (selectedCategory?.name === item.categoryName) {
                         setSelectedCategory(null);
@@ -349,20 +358,20 @@ interface ReportCategory {
                       }
                     }}
                     centerLabelComponent={() => (
-                      <View style={styles.centerContainer}>
+                      <View className="w-[140px] h-[140px] rounded-full items-center justify-center bg-white/5">
                         {selectedCategory ? (
-                          <View style={styles.tooltipInner}>
-                            <Text style={styles.tooltipName} numberOfLines={1}>{selectedCategory.name}</Text>
-                            <Text style={[styles.tooltipVal, { color: type === 0 ? Colors.accentExpense : Colors.accentIncome }]}>
+                          <View className="items-center p-2.5">
+                            <Text className="text-[10px] text-gray-400 mb-1 font-semibold" numberOfLines={1}>{selectedCategory.name}</Text>
+                            <Text className={`text-base font-extrabold mb-0.5 ${type === 0 ? 'text-expense' : 'text-income'}`}>
                               {selectedCategory.amount.toLocaleString()}đ
                             </Text>
-                            <Text style={styles.tooltipPercent}>{selectedCategory.percentage.toFixed(1)}%</Text>
+                            <Text className="text-[10px] text-accent font-bold">{selectedCategory.percentage.toFixed(1)}%</Text>
                           </View>
                         ) : (
-                          <View style={{ alignItems: 'center' }}>
-                            <Text style={{ fontSize: 10, color: Colors.textSecondary }}>Tổng</Text>
+                          <View className="items-center">
+                            <Text className="text-[10px] text-gray-500">Tổng</Text>
                             {sweepProgress === 1 && (
-                              <Text style={{ fontSize: 14, color: Colors.textPrimary, fontWeight: '700' }}>
+                              <Text className="text-sm text-white font-bold">
                                 {(type === 0 ? totalExpense : totalIncome).toLocaleString()}đ
                               </Text>
                             )}
@@ -372,94 +381,29 @@ interface ReportCategory {
                     )}
                   />
               ) : (
-                <View style={{ height: 200, width: 220, alignItems: 'center', justifyContent: 'center' }} />
+                <View className="h-[200px] w-[220px] items-center justify-center" />
               )}
             </Animated.View>
-          ) : <Text style={styles.emptyText}>Chưa có dữ liệu</Text>}
+          ) : <Text className="text-sm text-gray-500">Chưa có dữ liệu</Text>}
         </GlassBox>
 
-        <Text style={styles.sectionTitle}>Phân bổ danh mục</Text>
+        <Text className="text-xl font-bold text-white mb-3">Phân bổ danh mục</Text>
         {categories.map((cat, idx) => (
-          <GlassBox key={idx} style={styles.catItem} padding={10} intensity={10}>
-            <View style={styles.catRow}>
-              <View style={[styles.catColor, { backgroundColor: cat.color }]} />
-              <View style={styles.catInfo}>
-                <Text style={styles.catName}>{cat.name}</Text>
-                <Text style={styles.catPercent}>{cat.percentage.toFixed(1)}%</Text>
+          <GlassBox key={idx} className="mb-1.5" padding={10} intensity={10}>
+            <View className="flex-row items-center">
+              <View className="w-2.5 h-2.5 rounded-full mr-3" style={{ backgroundColor: cat.color }} />
+              <View className="flex-1">
+                <Text className="text-base text-white font-bold">{cat.name}</Text>
+                <Text className="text-xs text-gray-500">{cat.percentage.toFixed(1)}%</Text>
               </View>
-              <Text style={[styles.catAmount, { color: type === 0 ? Colors.accentExpense : Colors.accentIncome }]}>
+              <Text className={`text-base font-bold ${type === 0 ? 'text-expense' : 'text-income'}`}>
                 {type === 0 ? '-' : '+'}{cat.amount.toLocaleString()}đ
               </Text>
             </View>
           </GlassBox>
         ))}
-        <View style={{ height: 100 }} />
+        <View className="h-[100px]" />
       </ScrollView>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.bg },
-  scrollContent: { paddingHorizontal: Spacing.xl, paddingTop: 50 },
-  title: { fontSize: FontSize.xxxl, fontWeight: '600', color: Colors.textPrimary, marginBottom: Spacing.lg },
-  periodRow: { flexDirection: 'row', gap: 6, marginBottom: Spacing.md },
-  periodBtn: { flex: 1, height: 36, borderRadius: BorderRadius.md, backgroundColor: Colors.bgSecondary, alignItems: 'center', justifyContent: 'center' },
-  periodBtnActive: { backgroundColor: Colors.accentBlue },
-  periodBtnText: { color: Colors.textSecondary, fontSize: FontSize.xs, fontWeight: '600' },
-  periodBtnTextActive: { color: Colors.white },
-  datePickerOuter: { marginBottom: Spacing.md },
-  datePicker: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    justifyContent: 'center', 
-    gap: Spacing.md,
-    flexWrap: 'nowrap'
-  },
-  dateValue: { fontSize: FontSize.lg, fontWeight: '600', color: Colors.textPrimary },
-  typeSwitcher: { flexDirection: 'row', backgroundColor: Colors.bgSecondary, borderRadius: BorderRadius.md, padding: 4, marginBottom: Spacing.lg },
-  typeBtn: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: BorderRadius.md },
-  typeBtnActiveExpense: { backgroundColor: Colors.accentExpense },
-  typeBtnActiveIncome: { backgroundColor: Colors.accentIncome },
-  typeBtnText: { color: Colors.textTertiary, fontSize: 10, fontWeight: '800' },
-  typeBtnTextActive: { color: Colors.white },
-  chartBox: { minHeight: 260, justifyContent: 'center', alignItems: 'center', marginBottom: Spacing.lg },
-  chartInner: { alignItems: 'center', justifyContent: 'center' },
-  centerContainer: {
-    width: 140,
-    height: 140,
-    borderRadius: 70,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.02)',
-  },
-  tooltipInner: {
-    alignItems: 'center',
-    padding: 10,
-  },
-  tooltipName: {
-    fontSize: 10,
-    color: Colors.textSecondary,
-    marginBottom: 4,
-    fontWeight: '600',
-  },
-  tooltipVal: {
-    fontSize: 15,
-    fontWeight: '800',
-    marginBottom: 2,
-  },
-  tooltipPercent: {
-    fontSize: 10,
-    color: Colors.accentBlue,
-    fontWeight: '700',
-  },
-  emptyText: { color: Colors.textTertiary, fontSize: FontSize.sm },
-  sectionTitle: { fontSize: FontSize.xl, fontWeight: '600', color: Colors.textPrimary, marginBottom: Spacing.sm },
-  catItem: { marginBottom: 6 },
-  catRow: { flexDirection: 'row', alignItems: 'center' },
-  catColor: { width: 10, height: 10, borderRadius: 5, marginRight: 12 },
-  catInfo: { flex: 1 },
-  catName: { fontSize: FontSize.md, color: Colors.textPrimary, fontWeight: '600' },
-  catPercent: { fontSize: FontSize.xs, color: Colors.textTertiary },
-  catAmount: { fontSize: FontSize.md, fontWeight: '600' },
-});

@@ -101,23 +101,17 @@ export default function LoginScreen({ onNavigateToRegister, onLoginSuccess }: Lo
           await db.saveUserLocal(null, email, null, password);
         }
 
-        // 3. TỰ ĐỘNG TẢI DỮ LIỆU GIAO DỊCH (Sử dụng SyncService tập trung)
-        try {
-          await syncService.pullTransactions(uid);
-        } catch (e) {
-          // Lỗi tải giao dịch vẫn cho phép vào trong (giữ nguyên từ Java)
-          console.error('Error fetching transactions via SyncService:', e);
-        }
+        syncService.pullTransactions(uid).catch((e: any) => {
+          console.error('Background pull error:', e);
+        });
+        
+        // 4. ĐĂNG KÝ SESSION THIẾT BỊ (Chạy ngầm)
+        const { sessionService } = require('../../services/SessionService');
+        sessionService.registerSession(uid).catch((e: any) => {
+          console.error('Background session registration error:', e);
+        });
 
-        // 4. ĐĂNG KÝ SESSION THIẾT BỊ (Mới bổ sung cho Remote Logout)
-        try {
-          const { sessionService } = require('../../services/SessionService');
-          await sessionService.registerSession(uid);
-        } catch (e) {
-          console.error('Error registering device session:', e);
-        }
-
-        // Navigate to main app
+        // Chuyển vào app ngay lập tức
         onLoginSuccess();
       } catch (e) {
         // Nếu lỗi fetch Profile, đi thẳng vào (fallback - giữ nguyên từ Java)
@@ -126,7 +120,7 @@ export default function LoginScreen({ onNavigateToRegister, onLoginSuccess }: Lo
       }
     } catch (error: any) {
       // NẾU THẤT BẠI (giữ nguyên từ Java)
-      Alert.alert('Lỗi', 'Tài khoản không tồn tại');
+      Alert.alert('Lỗi', 'Email hoặc mật khẩu không chính xác');
     } finally {
       setIsLoading(false);
     }

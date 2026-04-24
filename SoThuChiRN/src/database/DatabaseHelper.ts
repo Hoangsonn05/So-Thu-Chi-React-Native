@@ -93,7 +93,7 @@ class DatabaseHelper {
         // Migrate existing rows - populate normalized content
         const rows = await this.db.getAllAsync<any>(`SELECT ${COLUMN_ID}, ${COLUMN_NOTE}, ${COLUMN_CATEGORY} FROM ${TABLE_TRANSACTIONS}`);
         for (const row of rows) {
-          const content = normalizeForSearch(`${row.note} ${row.category}`);
+          const content = ` ${normalizeForSearch(`${row.note} ${row.category}`)} `;
           await this.db.runAsync(
             `UPDATE ${TABLE_TRANSACTIONS} SET ${COLUMN_SEARCH_CONTENT} = ? WHERE ${COLUMN_ID} = ?`,
             [content, row.id]
@@ -143,7 +143,7 @@ class DatabaseHelper {
    */
   async addTransaction(t: Transaction): Promise<number> {
     const db = await this.open();
-    const searchContent = normalizeForSearch(`${t.note} ${t.category}`);
+    const searchContent = ` ${normalizeForSearch(`${t.note} ${t.category}`)} `;
     // is_synced gets 0 for newly added online/offline transactions, waiting for background sync
     const result = await db.runAsync(
       `INSERT INTO ${TABLE_TRANSACTIONS} (${COLUMN_AMOUNT}, ${COLUMN_NOTE}, ${COLUMN_CATEGORY}, ${COLUMN_DATE}, ${COLUMN_TYPE}, ${COLUMN_CREATED_BY}, ${COLUMN_DEVICE_NAME}, ${COLUMN_DEVICE_ID}, ${COLUMN_SEARCH_CONTENT}, ${COLUMN_IS_SYNCED}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -322,7 +322,7 @@ class DatabaseHelper {
     // Sử dụng transaction của SQLite để tăng tốc độ nạp dữ liệu
     await db.withTransactionAsync(async () => {
       for (const t of transactions) {
-        const searchContent = normalizeForSearch(`${t.note} ${t.category}`);
+        const searchContent = ` ${normalizeForSearch(`${t.note} ${t.category}`)} `;
         // data pulled from cloud is considered fully synced (1)
         await db.runAsync(
           `INSERT INTO ${TABLE_TRANSACTIONS} (${COLUMN_AMOUNT}, ${COLUMN_NOTE}, ${COLUMN_CATEGORY}, ${COLUMN_DATE}, ${COLUMN_TYPE}, ${COLUMN_CREATED_BY}, ${COLUMN_DEVICE_NAME}, ${COLUMN_DEVICE_ID}, ${COLUMN_SEARCH_CONTENT}, ${COLUMN_IS_SYNCED}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -359,13 +359,11 @@ class DatabaseHelper {
     
     // 1. Chuẩn hóa truy vấn (không dấu)
     const normalizedQuery = normalizeForSearch(query);
-    const sqlQuery = prepareSearchQuery(query);
-    
     // 2. Lấy danh sách các hạng mục liên quan theo chủ đề
     const relatedCategories = getRelatedCategories(normalizedQuery);
     
     let whereClause = `${COLUMN_SEARCH_CONTENT} LIKE ?`;
-    let params: any[] = [sqlQuery];
+    let params: any[] = [`% ${normalizedQuery} %`];
 
     // 3. Nếu gõ "food" -> tìm các giao dịch có hạng mục "Ăn uống"
     if (relatedCategories.length > 0) {

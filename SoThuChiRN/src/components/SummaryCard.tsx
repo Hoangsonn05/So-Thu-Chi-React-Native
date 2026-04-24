@@ -1,7 +1,6 @@
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Spacing, BorderRadius, FontSize } from '../theme/colors';
 import GlassBox from './GlassBox';
 
 interface SummaryCardProps {
@@ -28,16 +27,16 @@ const SummaryCard: React.FC<SummaryCardProps> = ({
   };
 
   return (
-    <GlassBox style={styles.container} padding={16} intensity={40}>
-      <View style={styles.mainRow}>
+    <GlassBox className="h-[100px] justify-center" padding={16} intensity={40}>
+      <View className="flex-row justify-between items-center">
         {/* Left Section: Total Balance */}
-        <View style={styles.section}>
-          <View style={styles.labelRow}>
-            <Ionicons name="wallet-outline" size={14} color={Colors.accentBlue} />
-            <Text style={styles.label}>Tổng tích lũy</Text>
+        <View className="flex-1">
+          <View className="flex-row items-center gap-x-1.5 mb-1">
+            <Ionicons name="wallet-outline" size={14} color="#00B0FF" />
+            <Text className="text-[10px] font-medium text-gray-400">Tổng tích lũy</Text>
           </View>
           <Text 
-            style={styles.primaryAmount}
+            className="text-2xl font-bold text-white"
             numberOfLines={1}
             adjustsFontSizeToFit
             minimumFontScale={0.7}
@@ -47,29 +46,28 @@ const SummaryCard: React.FC<SummaryCardProps> = ({
         </View>
 
         {/* Vertical Divider */}
-        <View style={styles.divider} />
+        <View className="w-[0.5px] h-10 bg-white/15 mx-4" />
 
         {/* Right Section: Time Nav + Monthly Balance */}
-        <View style={[styles.section, styles.alignEnd]}>
+        <View className="flex-1 items-end">
           {/* Time Navigator */}
-          <View style={styles.timeNav}>
-            <TouchableOpacity onPress={onPrev} style={styles.navBtn}>
-              <Ionicons name="chevron-back" size={14} color={Colors.textPrimary} />
+          <View className="flex-row items-center bg-white/5 rounded-md px-1 py-0.5 mb-1.5">
+            <TouchableOpacity onPress={onPrev} className="p-0.5">
+              <Ionicons name="chevron-back" size={14} color="#FFF" />
             </TouchableOpacity>
             <TouchableOpacity onPress={onDatePress}>
-              <Text style={styles.dateText}>{`${String(month).padStart(2, '0')}/${year}`}</Text>
+              <Text className="text-[11px] font-extrabold text-white mx-1 min-w-[44px] text-center">
+                {`${String(month).padStart(2, '0')}/${year}`}
+              </Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={onNext} style={styles.navBtn}>
-              <Ionicons name="chevron-forward" size={14} color={Colors.textPrimary} />
+            <TouchableOpacity onPress={onNext} className="p-0.5">
+              <Ionicons name="chevron-forward" size={14} color="#FFF" />
             </TouchableOpacity>
           </View>
 
           {/* Monthly Amount */}
           <Text 
-            style={[
-              styles.secondaryAmount, 
-              { color: periodBalance >= 0 ? Colors.accentIncome : Colors.accentExpense }
-            ]}
+            className={`text-lg font-bold ${periodBalance >= 0 ? 'text-income' : 'text-expense'}`}
             numberOfLines={1}
             adjustsFontSizeToFit
             minimumFontScale={0.6}
@@ -81,69 +79,5 @@ const SummaryCard: React.FC<SummaryCardProps> = ({
     </GlassBox>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    height: 100,
-    justifyContent: 'center',
-  },
-  mainRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  section: {
-    flex: 1,
-  },
-  alignEnd: {
-    alignItems: 'flex-end',
-  },
-  labelRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 4,
-  },
-  label: {
-    fontSize: 10,
-    fontWeight: '500',
-    color: Colors.textSecondary,
-  },
-  primaryAmount: {
-    fontSize: 22, // Target 22px-24px
-    fontWeight: '700',
-    color: Colors.textPrimary,
-  },
-  divider: {
-    width: 0.5,
-    height: 40,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    marginHorizontal: Spacing.md,
-  },
-  timeNav: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 6,
-    paddingHorizontal: 4,
-    paddingVertical: 2,
-    marginBottom: 6,
-  },
-  navBtn: {
-    padding: 2,
-  },
-  dateText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: Colors.textPrimary,
-    marginHorizontal: 4,
-    minWidth: 44,
-    textAlign: 'center',
-  },
-  secondaryAmount: {
-    fontSize: 16, // Target 16px-18px
-    fontWeight: '700',
-  },
-});
 
 export default SummaryCard;

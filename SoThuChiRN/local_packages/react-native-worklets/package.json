@@ -1,0 +1,10 @@
+{
+  "name": "react-native-worklets",
+  "version": "1.0.0",
+  "description": "Babel shim for worklets-core to prevent Android duplication",
+  "main": "index.js",
+  "files": [
+    "plugin.js",
+    "index.js"
+  ]
+}

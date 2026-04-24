@@ -4,20 +4,20 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  StyleSheet,
   ScrollView,
   Alert,
   ActivityIndicator,
 } from 'react-native';
-import { Colors, Spacing, BorderRadius, FontSize } from '../../theme/colors';
+import { Colors } from '../../theme/colors';
 import GlassBox from '../../components/GlassBox';
 import db from '../../database/DatabaseHelper';
 import { Ionicons } from '@expo/vector-icons';
-import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, CategoryItem } from '../../config/categories';
+import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from '../../config/categories';
 import NetInfo from '@react-native-community/netinfo';
 import { syncService } from '../../services/FirebaseSyncService';
 import UniversalDatePicker from '../../components/UniversalDatePicker';
-
+import { firebaseAuth } from '../../config/firebase';
+import { transactionEvents } from '../../services/TransactionEvents';
 
 function formatDate(date: Date): string {
   const days = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
@@ -73,13 +73,17 @@ export default function ExpenseScreen() {
       });
 
       if (localId !== -1) {
+        // Realtime refresh for all subscribed screens
+        transactionEvents.emitChanged();
+
         // Sync to cloud
         const netInfo = await NetInfo.fetch();
         const user = firebaseAuth().currentUser;
-        
+
         if (user && netInfo.isConnected && netInfo.isInternetReachable !== false) {
           // Push immediately with 'legacy' prefix
-          const newTx = await db.getAllTransactions().then(txs => txs.find(t => t.id === localId));
+          const allTransactions = await db.getAllTransactions();
+          const newTx = allTransactions.find(t => t.id === localId);
           if (newTx) {
             syncService.pushSingleTransaction(user.uid, newTx, 'legacy').catch(console.error);
           }
@@ -96,57 +100,57 @@ export default function ExpenseScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <View className="flex-1 bg-background">
       <ScrollView
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 50 }}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        <Text style={styles.title}>Nhập giao dịch</Text>
+        <Text className="text-3xl font-bold text-white mb-6">Nhập giao dịch</Text>
 
-        <View style={styles.typeSwitcher}>
-          <TouchableOpacity 
-            style={[styles.typeBtn, isExpense && styles.typeBtnActiveExpense]}
+        <View className="flex-row bg-white/5 rounded-2xl p-1 mb-4">
+          <TouchableOpacity
+            className={`flex-1 py-2.5 items-center rounded-xl ${isExpense ? 'bg-expense' : ''}`}
             onPress={() => { setIsExpense(true); setSelectedCategory(''); }}
           >
-            <Text style={[styles.typeBtnText, isExpense && styles.typeBtnTextActive]}>CHI TIÊU</Text>
+            <Text className={`text-[10px] font-bold ${isExpense ? 'text-white' : 'text-gray-400'}`}>CHI TIÊU</Text>
           </TouchableOpacity>
-          <TouchableOpacity 
-            style={[styles.typeBtn, !isExpense && styles.typeBtnActiveIncome]}
+          <TouchableOpacity
+            className={`flex-1 py-2.5 items-center rounded-xl ${!isExpense ? 'bg-income' : ''}`}
             onPress={() => { setIsExpense(false); setSelectedCategory(''); }}
           >
-            <Text style={[styles.typeBtnText, !isExpense && styles.typeBtnTextActive]}>THU NHẬP</Text>
+            <Text className={`text-[10px] font-bold ${!isExpense ? 'text-white' : 'text-gray-400'}`}>THU NHẬP</Text>
           </TouchableOpacity>
         </View>
 
-        <GlassBox style={styles.amountBox} padding={12} intensity={40}>
-          <Text style={styles.inputLabel}>Số tiền</Text>
-          <View style={styles.amountInputRow}>
+        <GlassBox className="h-[90px] mb-4 justify-center" padding={12} intensity={40}>
+          <Text className="text-xs text-gray-400 mb-0.5">Số tiền</Text>
+          <View className="flex-row items-center">
             <TextInput
-              style={[styles.amountInput, { color: isExpense ? Colors.accentExpense : Colors.accentIncome }]}
+              className={`flex-1 text-3xl font-bold ${isExpense ? 'text-expense' : 'text-income'}`}
               value={amount}
               onChangeText={(text) => { if (/^\d*$/.test(text)) setAmount(text); }}
               keyboardType="numeric"
               placeholder="0"
-              placeholderTextColor={Colors.textTertiary}
+              placeholderTextColor="rgba(255,255,255,0.2)"
             />
-            <Text style={[styles.currency, { color: isExpense ? Colors.accentExpense : Colors.accentIncome }]}>đ</Text>
+            <Text className={`text-xl font-semibold ml-2 ${isExpense ? 'text-expense' : 'text-income'}`}>đ</Text>
           </View>
         </GlassBox>
 
-        <View style={styles.row}>
-          <GlassBox style={styles.dateBox} padding={10} intensity={25}>
-            <Text style={styles.smallLabel}>Ngày</Text>
-            <View style={styles.dateControl}>
-              <TouchableOpacity onPress={handlePrevDate}><Ionicons name="chevron-back" size={16} color={Colors.textPrimary} /></TouchableOpacity>
+        <View className="flex-row gap-x-4 mb-6">
+          <GlassBox className="flex-1 h-[75px]" padding={10} intensity={25}>
+            <Text className="text-[10px] text-gray-500 mb-1">Ngày</Text>
+            <View className="flex-row items-center justify-center gap-x-2">
+              <TouchableOpacity onPress={handlePrevDate}><Ionicons name="chevron-back" size={16} color="#FFF" /></TouchableOpacity>
               <TouchableOpacity onPress={() => setIsPickerVisible(true)}>
-                <Text style={styles.dateText}>{dateStr.split(' ')[0]}</Text>
+                <Text className="text-lg font-bold text-white">{dateStr.split(' ')[0]}</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={handleNextDate}><Ionicons name="chevron-forward" size={16} color={Colors.textPrimary} /></TouchableOpacity>
+              <TouchableOpacity onPress={handleNextDate}><Ionicons name="chevron-forward" size={16} color="#FFF" /></TouchableOpacity>
             </View>
           </GlassBox>
 
-          <UniversalDatePicker 
+          <UniversalDatePicker
             isVisible={isPickerVisible}
             currentMonth={currentDate.getMonth() + 1}
             currentYear={currentDate.getFullYear()}
@@ -157,116 +161,80 @@ export default function ExpenseScreen() {
             }}
           />
 
-          <GlassBox style={styles.noteBox} padding={10} intensity={25}>
-            <Text style={styles.smallLabel}>Ghi chú</Text>
+          <GlassBox className="flex-[1.5] h-[75px]" padding={10} intensity={25}>
+            <Text className="text-[10px] text-gray-500 mb-1">Ghi chú</Text>
             <TextInput
-              style={styles.noteInput}
+              className="text-lg p-0"
+              style={{ color: '#FFFFFF', paddingVertical: 0 }}
               value={note}
               onChangeText={setNote}
               placeholder="Ghi chú..."
-              placeholderTextColor={Colors.textTertiary}
+              placeholderTextColor="rgba(255,255,255,0.2)"
               numberOfLines={1}
+              underlineColorAndroid="transparent"
             />
           </GlassBox>
         </View>
 
-        <Text style={styles.sectionTitle}>Chọn danh mục</Text>
-        
-        <View style={styles.categoryGrid}>
+        <Text className="text-lg font-bold text-white mb-2">Chọn danh mục</Text>
+
+        <View className="flex-row flex-wrap -mx-1">
           {activeCategories.map((category) => (
             <TouchableOpacity
               key={category.name}
               onPress={() => setSelectedCategory(category.name)}
               activeOpacity={0.7}
-              style={styles.catWrapper}
+              className="w-1/4 p-1"
             >
-              <GlassBox 
-                padding={8}
+              <View 
                 style={[
-                  styles.categoryCard, 
-                  selectedCategory === category.name && { borderColor: isExpense ? Colors.accentExpense : Colors.accentIncome, borderWidth: 1 }
+                  {
+                    height: 70,
+                    backgroundColor: 'rgba(255,255,255,0.03)',
+                    borderRadius: 12,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderWidth: 1,
+                    borderColor: 'transparent'
+                  },
+                  selectedCategory === category.name && { 
+                    borderColor: isExpense ? Colors.accentExpense : Colors.accentIncome,
+                  }
                 ]}
-                intensity={selectedCategory === category.name ? 50 : 20}
               >
-                <Text style={styles.categoryEmoji}>{category.emoji}</Text>
+                <View style={{ width: 40, height: 40, alignItems: 'center', justifyContent: 'center', marginBottom: 2 }}>
+                  <Text style={{ fontSize: 24 }}>{category.emoji}</Text>
+                </View>
                 <Text 
                   style={[
-                    styles.categoryName,
-                    selectedCategory === category.name && { color: isExpense ? Colors.accentExpense : Colors.accentIncome, fontWeight: '600' }
+                    { fontSize: 10, textAlign: 'center', color: Colors.textSecondary },
+                    selectedCategory === category.name && { color: isExpense ? Colors.accentExpense : Colors.accentIncome, fontWeight: '700' }
                   ]}
                   numberOfLines={1}
                 >
                   {category.name}
                 </Text>
-              </GlassBox>
+              </View>
             </TouchableOpacity>
           ))}
         </View>
 
         <TouchableOpacity
-          style={[
-            styles.submitButton, 
-            { backgroundColor: isExpense ? Colors.accentExpense : Colors.accentIncome },
-            isSubmitting && { opacity: 0.6 }
-          ]}
+          className={`mt-8 h-12 rounded-full items-center justify-center ${isExpense ? 'bg-expense' : 'bg-income'} ${isSubmitting ? 'opacity-60' : ''}`}
           onPress={handleSubmit}
           disabled={isSubmitting}
         >
           {isSubmitting ? (
-            <ActivityIndicator color={Colors.white} />
+            <ActivityIndicator color="#FFF" />
           ) : (
-            <Text style={styles.submitText}>
+            <Text className="text-white text-lg font-bold">
               Lưu {isExpense ? 'chi tiêu' : 'thu nhập'}
             </Text>
           )}
         </TouchableOpacity>
 
-        <View style={{ height: 100 }} />
+        <View className="h-[100px]" />
       </ScrollView>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.bg },
-  scrollContent: { paddingHorizontal: Spacing.xl, paddingTop: 50 },
-  title: { fontSize: FontSize.xxxl, fontWeight: '600', color: Colors.textPrimary, marginBottom: Spacing.lg },
-  typeSwitcher: {
-    flexDirection: 'row',
-    backgroundColor: Colors.bgSecondary,
-    borderRadius: BorderRadius.md,
-    padding: 4,
-    marginBottom: Spacing.md,
-  },
-  typeBtn: { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: BorderRadius.md },
-  typeBtnActiveExpense: { backgroundColor: Colors.accentExpense },
-  typeBtnActiveIncome: { backgroundColor: Colors.accentIncome },
-  typeBtnText: { color: Colors.textTertiary, fontSize: FontSize.xs, fontWeight: '700' },
-  typeBtnTextActive: { color: Colors.white },
-  amountBox: { height: 90, marginBottom: Spacing.md, justifyContent: 'center' },
-  inputLabel: { fontSize: FontSize.xs, color: Colors.textSecondary, marginBottom: 2 },
-  amountInputRow: { flexDirection: 'row', alignItems: 'center' },
-  amountInput: { flex: 1, fontSize: 32, fontWeight: '700', padding: 0 },
-  currency: { fontSize: 20, fontWeight: '600', marginLeft: 8 },
-  row: { flexDirection: 'row', gap: Spacing.md, marginBottom: Spacing.lg },
-  dateBox: { flex: 1, height: 75 },
-  noteBox: { flex: 1.5, height: 75 },
-  smallLabel: { fontSize: FontSize.xs, color: Colors.textTertiary, marginBottom: 4 },
-  dateControl: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: Spacing.sm },
-  dateText: { fontSize: FontSize.lg, fontWeight: '600', color: Colors.textPrimary },
-  noteInput: { fontSize: FontSize.lg, color: Colors.textPrimary, padding: 0 },
-  sectionTitle: { fontSize: FontSize.lg, fontWeight: '600', color: Colors.textPrimary, marginBottom: Spacing.sm },
-  categoryGrid: { flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -4 },
-  catWrapper: { width: '25%', padding: 4 }, // 4 columns for more density
-  categoryCard: { height: 70, alignItems: 'center', justifyContent: 'center' },
-  categoryEmoji: { fontSize: 22, marginBottom: 2 },
-  categoryName: { fontSize: 10, color: Colors.textSecondary, textAlign: 'center' },
-  submitButton: {
-    marginTop: Spacing.xl,
-    height: 48, // Compact height
-    borderRadius: BorderRadius.pill,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  submitText: { color: Colors.white, fontSize: FontSize.lg, fontWeight: '600' },
-});

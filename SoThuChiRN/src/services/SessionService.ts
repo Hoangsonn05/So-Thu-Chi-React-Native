@@ -55,7 +55,7 @@ class SessionService {
         osName: Device.osName,
         osVersion: Device.osVersion,
         lastActive: firestoreDb.FieldValue.serverTimestamp(),
-        appVersion: Application.nativeAppVersion || '1.0.0',
+        appVersion: Application.nativeApplicationVersion || '1.0.0',
         status: 'active'
       }, { merge: true });
 
@@ -101,9 +101,17 @@ class SessionService {
         .collection('devices')
         .doc(deviceId);
 
+      let skipFirstEmpty = true;
       const unsubscribe = sessionRef.onSnapshot(snapshot => {
         if (!snapshot.exists) {
+          if (skipFirstEmpty) {
+            console.log('Initial session snapshot empty, waiting for registration...');
+            skipFirstEmpty = false;
+            return;
+          }
           onRevoked();
+        } else {
+          skipFirstEmpty = false;
         }
       }, error => {
         console.error('Session listener error:', error);

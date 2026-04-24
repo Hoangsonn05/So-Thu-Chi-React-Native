@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   ScrollView,
   TouchableOpacity,
   Dimensions,
@@ -10,13 +9,14 @@ import {
   Animated,
   Easing,
 } from 'react-native';
-import { Colors, Spacing, BorderRadius, FontSize } from '../../theme/colors';
+import { Colors } from '../../theme/colors';
 import GlassBox from '../../components/GlassBox';
 import db from '../../database/DatabaseHelper';
 import { Transaction } from '../../models/Transaction';
 import { BarChart } from 'react-native-gifted-charts';
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
+import { transactionEvents } from '../../services/TransactionEvents';
 
 const { width } = Dimensions.get('window');
 
@@ -59,7 +59,6 @@ export default function YearlyReportScreen({ navigation }: any) {
       let yearExpense = 0;
 
       yearlyTransactions.forEach(t => {
-        // Parse date "dd/mm/yyyy" to get month
         const parts = t.date.split('/');
         if (parts.length === 3) {
           const m = parseInt(parts[1], 10);
@@ -82,7 +81,6 @@ export default function YearlyReportScreen({ navigation }: any) {
       setTotalExpense(yearExpense);
       setTotalNet(yearIncome - yearExpense);
 
-      // Calculate Average based on active tab
       if (activeTab === 0) setAvgValue(yearExpense / 12);
       else if (activeTab === 1) setAvgValue(yearIncome / 12);
       else setAvgValue((yearIncome - yearExpense) / 12);
@@ -96,6 +94,14 @@ export default function YearlyReportScreen({ navigation }: any) {
 
   useEffect(() => {
     fetchYearlyData();
+  }, [fetchYearlyData]);
+
+  useEffect(() => {
+    const unsubscribe = transactionEvents.subscribe(() => {
+      fetchYearlyData();
+    });
+
+    return unsubscribe;
   }, [fetchYearlyData]);
 
   useEffect(() => {
@@ -122,132 +128,112 @@ export default function YearlyReportScreen({ navigation }: any) {
     setSelectedYear(prev => prev + delta);
   };
 
-  // Prepare chart data based on active tab
-  const chartData = monthlyBreakdown.map((item, index) => {
+  const chartData = monthlyBreakdown.map((item) => {
     let value = 0;
     let label = `T${item.month}`;
-    let frontColor = Colors.accentBlue;
+    let frontColor = '#00B0FF';
 
     if (activeTab === 0) {
       value = item.expense;
-      frontColor = Colors.accentExpense;
+      frontColor = '#FF5252';
     } else if (activeTab === 1) {
       value = item.income;
-      frontColor = Colors.accentIncome;
+      frontColor = '#00E676';
     } else {
       value = item.net;
-      frontColor = item.net >= 0 ? Colors.accentIncome : Colors.accentExpense;
+      frontColor = item.net >= 0 ? '#00E676' : '#FF5252';
     }
 
-    // Animated value for "sweep" effect
-    const animatedValue = sweepAnim.interpolate({
-      inputRange: [0, 1],
-      outputRange: [0, value],
-    });
-
     return {
-      value: value || 1, // Visual placeholder for 0
+      value: value || 1,
       label: label,
       frontColor: frontColor,
       onPress: () => {},
-      // Custom property for our renderer if needed
       origValue: value,
     };
   });
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
-        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-          <Ionicons name="chevron-back" size={24} color={Colors.white} />
+    <View className="flex-1 bg-background">
+      <View className="h-[90px] flex-row items-center justify-between px-4 pt-10 z-10">
+        <BlurView intensity={80} tint="dark" className="absolute inset-0" />
+        <TouchableOpacity className="w-10 h-10 items-center justify-center" onPress={() => navigation.goBack()}>
+          <Ionicons name="chevron-back" size={24} color="#FFF" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Báo cáo năm {selectedYear}</Text>
-        <View style={{ width: 40 }} />
+        <Text className="text-lg font-bold text-white">Báo cáo năm {selectedYear}</Text>
+        <View className="w-10" />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* Year Picker */}
-        <GlassBox padding={12} style={styles.yearPickerContainer}>
-          <View style={styles.yearPicker}>
-            <TouchableOpacity onPress={() => changeYear(-1)} style={styles.navBtn}>
-              <Ionicons name="chevron-back" size={22} color={Colors.textPrimary} />
+      <ScrollView contentContainerStyle={{ padding: 16 }} showsVerticalScrollIndicator={false}>
+        <GlassBox padding={12} className="mb-4">
+          <View className="flex-row items-center justify-center gap-x-4">
+            <TouchableOpacity onPress={() => changeYear(-1)} className="p-2 w-10 items-center">
+              <Ionicons name="chevron-back" size={22} color="#FFF" />
             </TouchableOpacity>
-            <View style={styles.yearTextContainer}>
-              <Text style={styles.yearText}>Năm {selectedYear}</Text>
-              <Text style={styles.yearRange}>(01/01 - 31/12)</Text>
+            <View className="items-center min-w-[120px]">
+              <Text className="text-lg font-bold text-white">Năm {selectedYear}</Text>
+              <Text className="text-[10px] text-gray-500 mt-[-2px]">(01/01 - 31/12)</Text>
             </View>
-            <TouchableOpacity onPress={() => changeYear(1)} style={styles.navBtn}>
-              <Ionicons name="chevron-forward" size={22} color={Colors.textPrimary} />
+            <TouchableOpacity onPress={() => changeYear(1)} className="p-2 w-10 items-center">
+              <Ionicons name="chevron-forward" size={22} color="#FFF" />
             </TouchableOpacity>
           </View>
         </GlassBox>
 
-        {/* Tab Selection */}
-        <View style={styles.tabContainer}>
-          <TouchableOpacity 
-            style={[styles.tabBtn, activeTab === 0 && styles.tabBtnActive]} 
-            onPress={() => setActiveTab(0)}
-          >
-            <Text style={[styles.tabText, activeTab === 0 && styles.tabTextActive]}>Chi tiêu</Text>
-          </TouchableOpacity>
-          <TouchableOpacity 
-            style={[styles.tabBtn, activeTab === 1 && styles.tabBtnActive]} 
-            onPress={() => setActiveTab(1)}
-          >
-            <Text style={[styles.tabText, activeTab === 1 && styles.tabTextActive]}>Thu nhập</Text>
-          </TouchableOpacity>
-          <TouchableOpacity 
-            style={[styles.tabBtn, activeTab === 2 && styles.tabBtnActive]} 
-            onPress={() => setActiveTab(2)}
-          >
-            <Text style={[styles.tabText, activeTab === 2 && styles.tabTextActive]}>Tổng</Text>
-          </TouchableOpacity>
+        <View className="flex-row bg-white/5 rounded-2xl p-1 mb-4">
+          {['Chi tiêu', 'Thu nhập', 'Tổng'].map((label, idx) => (
+            <TouchableOpacity 
+              key={idx}
+              className={`flex-1 py-2.5 items-center rounded-xl ${activeTab === idx ? 'bg-white/10' : ''}`} 
+              onPress={() => setActiveTab(idx)}
+            >
+              <Text className={`text-sm ${activeTab === idx ? 'text-white font-bold' : 'text-gray-500'}`}>{label}</Text>
+            </TouchableOpacity>
+          ))}
         </View>
 
-        {/* Global Stats Grid */}
-        <View style={styles.statsGrid}>
+        <View className="mb-4">
           {activeTab < 2 ? (
-            <>
-              <GlassBox style={styles.statCard} padding={12}>
-                <Text style={styles.statLabel}>Tổng {activeTab === 0 ? 'chi' : 'thu'}</Text>
-                <Text style={[styles.statValue, { color: activeTab === 0 ? Colors.accentExpense : Colors.accentIncome }]}>
+            <View className="flex-row gap-x-4">
+              <GlassBox className="flex-1 items-center justify-center" padding={12}>
+                <Text className="text-[10px] text-gray-500 mb-1">Tổng {activeTab === 0 ? 'chi' : 'thu'}</Text>
+                <Text className={`text-sm font-bold ${activeTab === 0 ? 'text-expense' : 'text-income'}`}>
                   {formatCurrency(activeTab === 0 ? totalExpense : totalIncome)}
                 </Text>
               </GlassBox>
-              <GlassBox style={styles.statCard} padding={12}>
-                <Text style={styles.statLabel}>Trung bình tháng</Text>
-                <Text style={[styles.statValue, { color: Colors.accentBlue }]}>
+              <GlassBox className="flex-1 items-center justify-center" padding={12}>
+                <Text className="text-[10px] text-gray-500 mb-1">Trung bình tháng</Text>
+                <Text className="text-sm font-bold text-accent">
                   {formatCurrency(avgValue)}
                 </Text>
               </GlassBox>
-            </>
+            </View>
           ) : (
-            <View style={{ width: '100%', gap: Spacing.md }}>
-              <View style={styles.statsRow}>
-                <GlassBox style={styles.statCard} padding={12}>
-                  <Text style={styles.statLabel}>Tổng số dư</Text>
-                  <Text style={[styles.statValue, { color: totalNet >= 0 ? Colors.accentIncome : Colors.accentExpense }]}>
+            <View className="gap-y-4">
+              <View className="flex-row gap-x-4">
+                <GlassBox className="flex-1 items-center justify-center" padding={12}>
+                  <Text className="text-[10px] text-gray-500 mb-1">Tổng số dư</Text>
+                  <Text className={`text-sm font-bold ${totalNet >= 0 ? 'text-income' : 'text-expense'}`}>
                     {formatCurrency(totalNet)}
                   </Text>
                 </GlassBox>
-                <GlassBox style={styles.statCard} padding={12}>
-                  <Text style={styles.statLabel}>Trung bình dư/tháng</Text>
-                  <Text style={[styles.statValue, { color: Colors.accentBlue }]}>
+                <GlassBox className="flex-1 items-center justify-center" padding={12}>
+                  <Text className="text-[10px] text-gray-500 mb-1">Trung bình dư/tháng</Text>
+                  <Text className="text-sm font-bold text-accent">
                     {formatCurrency(avgValue)}
                   </Text>
                 </GlassBox>
               </View>
-              <View style={styles.statsRow}>
-                <GlassBox style={styles.statCard} padding={12}>
-                  <Text style={styles.statLabel}>Tổng thu nhập</Text>
-                  <Text style={[styles.statValueSmall, { color: Colors.accentIncome }]}>
+              <View className="flex-row gap-x-4">
+                <GlassBox className="flex-1 items-center justify-center" padding={12}>
+                  <Text className="text-[10px] text-gray-500 mb-1">Tổng thu nhập</Text>
+                  <Text className="text-xs font-bold text-income">
                     {formatCurrency(totalIncome)}
                   </Text>
                 </GlassBox>
-                <GlassBox style={styles.statCard} padding={12}>
-                  <Text style={styles.statLabel}>Tổng chi tiêu</Text>
-                  <Text style={[styles.statValueSmall, { color: Colors.accentExpense }]}>
+                <GlassBox className="flex-1 items-center justify-center" padding={12}>
+                  <Text className="text-[10px] text-gray-500 mb-1">Tổng chi tiêu</Text>
+                  <Text className="text-xs font-bold text-expense">
                     {formatCurrency(totalExpense)}
                   </Text>
                 </GlassBox>
@@ -257,16 +243,16 @@ export default function YearlyReportScreen({ navigation }: any) {
         </View>
 
         {isLoading ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color={Colors.accentBlue} />
+          <View className="h-[300px] justify-center items-center">
+            <ActivityIndicator size="large" color="#00B0FF" />
           </View>
         ) : (
           <>
-            <GlassBox style={styles.chartCard} padding={16}>
-              <Text style={styles.chartTitle}>
+            <GlassBox className="mb-4" padding={16}>
+              <Text className="text-sm font-semibold text-gray-400 mb-4">
                 Biểu đồ {activeTab === 0 ? 'chi tiêu' : activeTab === 1 ? 'thu nhập' : 'biến động'} tháng
               </Text>
-              <View style={styles.chartWrapper}>
+              <View className="items-center ml-[-20px]">
                 {renderChart && (
                   <BarChart
                     data={chartData}
@@ -278,8 +264,8 @@ export default function YearlyReportScreen({ navigation }: any) {
                     hideRules
                     xAxisThickness={0}
                     yAxisThickness={0}
-                    xAxisLabelTextStyle={{ color: Colors.textTertiary, fontSize: 10 }}
-                    yAxisTextStyle={{ color: Colors.textTertiary, fontSize: 10 }}
+                    xAxisLabelTextStyle={{ color: '#999', fontSize: 10 }}
+                    yAxisTextStyle={{ color: '#999', fontSize: 10 }}
                     noOfSections={4}
                     maxValue={Math.max(...chartData.map(d => Math.abs(d.origValue))) * 1.2 || 1000}
                     isAnimated
@@ -289,21 +275,21 @@ export default function YearlyReportScreen({ navigation }: any) {
               </View>
             </GlassBox>
 
-            <GlassBox style={styles.listCard} padding={0}>
-              <View style={styles.listHeader}>
-                <Text style={styles.listHeaderText}>Chi tiết từng tháng</Text>
+            <GlassBox className="overflow-hidden" padding={0}>
+              <View className="p-3 bg-white/5 border-b border-white/10">
+                <Text className="text-xs font-bold text-gray-500">Chi tiết từng tháng</Text>
               </View>
               {monthlyBreakdown.map((item, index) => {
                 let displayValue = 0;
-                let color = Colors.textPrimary;
-                if (activeTab === 0) { displayValue = item.expense; color = Colors.accentExpense; }
-                else if (activeTab === 1) { displayValue = item.income; color = Colors.accentIncome; }
-                else { displayValue = item.net; color = item.net >= 0 ? Colors.accentIncome : Colors.accentExpense; }
+                let colorClass = 'text-white';
+                if (activeTab === 0) { displayValue = item.expense; colorClass = 'text-expense'; }
+                else if (activeTab === 1) { displayValue = item.income; colorClass = 'text-income'; }
+                else { displayValue = item.net; colorClass = item.net >= 0 ? 'text-income' : 'text-expense'; }
 
                 return (
-                  <View key={index} style={[styles.monthItem, index === 11 && { borderBottomWidth: 0 }]}>
-                    <Text style={styles.monthName}>Tháng {item.month}</Text>
-                    <Text style={[styles.monthValue, { color }]}>
+                  <View key={index} className={`flex-row justify-between items-center p-3.5 border-b border-white/5 ${index === 11 ? 'border-b-0' : ''}`}>
+                    <Text className="text-sm text-white font-medium">Tháng {item.month}</Text>
+                    <Text className={`text-sm font-bold ${colorClass}`}>
                       {activeTab < 2 ? 
                         (activeTab === 0 ? '-' : '+') + formatCurrency(displayValue) : 
                         formatCurrency(displayValue)
@@ -316,80 +302,8 @@ export default function YearlyReportScreen({ navigation }: any) {
           </>
         )}
 
-        <View style={{ height: 60 }} />
+        <View className="h-[60px]" />
       </ScrollView>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.bg },
-  header: {
-    height: 90,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: Spacing.md,
-    paddingTop: 40,
-    zIndex: 10,
-  },
-  headerTitle: { fontSize: FontSize.lg, fontWeight: 'bold', color: Colors.white },
-  backBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  scrollContent: { padding: Spacing.md },
-  yearPickerContainer: {
-    marginBottom: Spacing.md,
-  },
-  yearPicker: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.md,
-    flexWrap: 'nowrap',
-  },
-  navBtn: { 
-    padding: 8,
-    width: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  yearTextContainer: { 
-    alignItems: 'center',
-    minWidth: 120,
-  },
-  yearText: { fontSize: FontSize.lg, fontWeight: 'bold', color: Colors.textPrimary },
-  yearRange: { fontSize: 10, color: Colors.textTertiary, marginTop: -1 },
-  tabContainer: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderRadius: BorderRadius.xl,
-    padding: 4,
-    marginBottom: Spacing.md,
-  },
-  tabBtn: { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: BorderRadius.lg },
-  tabBtnActive: { backgroundColor: 'rgba(255,255,255,0.1)' },
-  tabText: { fontSize: FontSize.sm, color: Colors.textTertiary },
-  tabTextActive: { color: Colors.white, fontWeight: 'bold' },
-  statsGrid: { marginBottom: Spacing.md },
-  statsRow: { flexDirection: 'row', gap: Spacing.md },
-  statCard: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  statLabel: { fontSize: 10, color: Colors.textTertiary, marginBottom: 4 },
-  statValue: { fontSize: FontSize.sm, fontWeight: 'bold' },
-  statValueSmall: { fontSize: 12, fontWeight: 'bold' },
-  loadingContainer: { height: 300, justifyContent: 'center', alignItems: 'center' },
-  chartCard: { marginBottom: Spacing.md },
-  chartTitle: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textSecondary, marginBottom: 16 },
-  chartWrapper: { alignItems: 'center', marginLeft: -20 },
-  listCard: { overflow: 'hidden' },
-  listHeader: { padding: 12, backgroundColor: 'rgba(255,255,255,0.03)', borderBottomWidth: 1, borderBottomColor: Colors.glassBorder },
-  listHeaderText: { fontSize: FontSize.xs, fontWeight: 'bold', color: Colors.textTertiary },
-  monthItem: { 
-    flexDirection: 'row', 
-    justifyContent: 'space-between', 
-    alignItems: 'center', 
-    padding: 14, 
-    borderBottomWidth: 1, 
-    borderBottomColor: 'rgba(255,255,255,0.05)' 
-  },
-  monthName: { fontSize: FontSize.sm, color: Colors.textPrimary },
-  monthValue: { fontSize: FontSize.sm, fontWeight: 'bold' },
-});

@@ -3,6 +3,7 @@
  * Logic for generating PDF and Excel documents and opening the Share Sheet.
  */
 
+import { Platform, Alert } from 'react-native';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system';
@@ -10,25 +11,79 @@ import XLSX from 'xlsx';
 import { Transaction } from '../models/Transaction';
 import { API_ENDPOINTS } from '../config/api';
 
+const DIRECTORY_URI_FILE = `${FileSystem.documentDirectory}save_directory_uri.txt`;
+
 class ExportService {
   /**
-   * Export a list of transactions to a PDF file and share it.
+   * Export a list of transactions to a PDF file and share it (iOS) or save it (Android).
    */
   async exportToPDF(transactions: Transaction[], title: string = 'Báo cáo giao dịch'): Promise<void> {
     try {
       const html = this.generateHTML(transactions, title);
       const { uri } = await Print.printToFileAsync({ html });
-      const pdfUri = `${FileSystem.cacheDirectory}${title.replace(/\s+/g, '_')}_${Date.now()}.pdf`;
+      const safeTitle = title.replace(/\s+/g, '_');
+      const pdfUri = `${FileSystem.cacheDirectory}${safeTitle}_${Date.now()}.pdf`;
       await FileSystem.moveAsync({ from: uri, to: pdfUri });
-      
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(pdfUri);
+
+      if (Platform.OS === 'android') {
+        await this.saveToAndroidDevice(pdfUri, `${safeTitle}.pdf`);
       } else {
-        alert('Tính năng chia sẻ không khả dụng trên thiết bị này');
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(pdfUri);
+        } else {
+          Alert.alert('Lỗi', 'Tính năng chia sẻ không khả dụng trên thiết bị này');
+        }
       }
     } catch (error) {
       console.error('Export PDF Error:', error);
       throw error;
+    }
+  }
+
+  /**
+   * Internal helper to save file to Android public storage using SAF.
+   */
+  private async saveToAndroidDevice(fileUri: string, fileName: string): Promise<void> {
+    try {
+      let directoryUri: string | null = null;
+
+      // Try to read existing directory URI
+      const info = await FileSystem.getInfoAsync(DIRECTORY_URI_FILE);
+      if (info.exists) {
+        directoryUri = await FileSystem.readAsStringAsync(DIRECTORY_URI_FILE);
+      }
+
+      // If no directory URI or it's invalid, request permission
+      if (!directoryUri) {
+        const permissions = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+        if (permissions.granted) {
+          directoryUri = permissions.directoryUri;
+          await FileSystem.writeAsStringAsync(DIRECTORY_URI_FILE, directoryUri);
+        } else {
+          // User cancelled, fallback to sharing
+          if (await Sharing.isAvailableAsync()) {
+            await Sharing.shareAsync(fileUri);
+          }
+          return;
+        }
+      }
+
+      // Create the file in the selected directory
+      const base64 = await FileSystem.readAsStringAsync(fileUri, { encoding: FileSystem.EncodingType.Base64 });
+      const newFileUri = await FileSystem.StorageAccessFramework.createFileAsync(
+        directoryUri,
+        fileName,
+        'application/pdf'
+      );
+
+      await FileSystem.writeAsStringAsync(newFileUri, base64, { encoding: FileSystem.EncodingType.Base64 });
+      Alert.alert('Thành công', `Báo cáo đã được lưu vào máy.`);
+    } catch (error) {
+      console.error('Save to Android Error:', error);
+      // Fallback to sharing if something goes wrong
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri);
+      }
     }
   }
 
@@ -59,7 +114,7 @@ class ExportService {
 
       // 4. Write file and share
       await FileSystem.writeAsStringAsync(uri, wbout, { encoding: FileSystem.EncodingType.Base64 });
-      
+
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(uri);
       } else {

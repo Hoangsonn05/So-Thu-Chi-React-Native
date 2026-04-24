@@ -2,15 +2,15 @@ import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   ScrollView,
   TouchableOpacity,
   ActivityIndicator,
   Alert,
   StatusBar,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Spacing, BorderRadius, FontSize } from '../../theme/colors';
+import { Colors } from '../../theme/colors';
 import GlassBox from '../../components/GlassBox';
 import { sessionService } from '../../services/SessionService';
 import { firebaseAuth } from '../../config/firebase';
@@ -23,39 +23,37 @@ interface SessionItemProps {
 
 function SessionItem({ session, isCurrent, onRevoke }: SessionItemProps) {
   return (
-    <GlassBox style={styles.sessionCard} padding={16} intensity={isCurrent ? 30 : 15}>
-      <View style={styles.sessionHeader}>
-        <View style={[styles.iconContainer, isCurrent && styles.currentIconContainer]}>
+    <GlassBox className="mb-4" padding={16} intensity={isCurrent ? 30 : 15}>
+      <View className="flex-row items-center">
+        <View className={`w-10 h-10 rounded-full items-center justify-center mr-3 ${isCurrent ? 'bg-accent/20' : 'bg-white/5'}`}>
           <Ionicons 
-            name={Platform.select({ ios: 'logo-apple', android: 'logo-android', default: 'phone-portrait' })} 
+            name={Platform.select({ ios: 'logo-apple', android: 'logo-android', default: 'phone-portrait' }) as any} 
             size={20} 
-            color={isCurrent ? Colors.accentBlue : Colors.textTertiary} 
+            color={isCurrent ? '#00B0FF' : '#999'} 
           />
         </View>
-        <View style={styles.sessionInfo}>
-          <Text style={styles.deviceName}>{session.deviceName || 'Thiết bị không tên'}</Text>
-          <Text style={styles.deviceModel}>{session.deviceModel || 'Unknown Model'} • {session.osName} {session.osVersion}</Text>
+        <View className="flex-1">
+          <Text className="text-base font-bold text-white">{session.deviceName || 'Thiết bị không tên'}</Text>
+          <Text className="text-xs text-gray-500 mt-0.5">{session.deviceModel || 'Unknown Model'} • {session.osName} {session.osVersion}</Text>
           {session.lastActive && (
-            <Text style={styles.lastActive}>
+            <Text className="text-[10px] text-accent mt-1">
               Hoạt động: {session.lastActive.toDate ? session.lastActive.toDate().toLocaleString('vi-VN') : 'Vừa xong'}
             </Text>
           )}
         </View>
         {isCurrent ? (
-          <View style={styles.currentBadge}>
-            <Text style={styles.currentBadgeText}>Hiện tại</Text>
+          <View className="bg-income px-2.5 py-1 rounded-full">
+            <Text className="text-[10px] font-extrabold text-white">Hiện tại</Text>
           </View>
         ) : (
-          <TouchableOpacity style={styles.deleteBtn} onPress={onRevoke}>
-            <Ionicons name="trash-outline" size={20} color={Colors.accentExpense} />
+          <TouchableOpacity className="p-2" onPress={onRevoke}>
+            <Ionicons name="trash-outline" size={20} color="#FF5252" />
           </TouchableOpacity>
         )}
       </View>
     </GlassBox>
   );
 }
-
-import { Platform } from 'react-native';
 
 export default function DeviceManagementScreen({ navigation }: any) {
   const [sessions, setSessions] = useState<any[]>([]);
@@ -72,7 +70,6 @@ export default function DeviceManagementScreen({ navigation }: any) {
       setCurrentDeviceId(id);
       const activeSessions = await sessionService.getActiveSessions(user.uid);
       
-      // Sort: current device first, then by lastActive
       const sorted = activeSessions.sort((a, b) => {
         if (a.deviceId === id) return -1;
         if (b.deviceId === id) return 1;
@@ -117,30 +114,30 @@ export default function DeviceManagementScreen({ navigation }: any) {
   };
 
   return (
-    <View style={styles.container}>
+    <View className="flex-1 bg-background">
       <StatusBar barStyle="light-content" />
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-          <Ionicons name="chevron-back" size={24} color={Colors.textPrimary} />
+      <View className="flex-row items-center justify-between pt-[50px] px-5 pb-[15px] bg-black/20">
+        <TouchableOpacity className="p-2" onPress={() => navigation.goBack()}>
+          <Ionicons name="chevron-back" size={24} color="#FFF" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Quản lý đăng nhập</Text>
-        <TouchableOpacity style={styles.refreshBtn} onPress={fetchSessions} disabled={isLoading}>
-          <Ionicons name="refresh" size={20} color={isLoading ? Colors.textTertiary : Colors.accentBlue} />
+        <Text className="text-lg font-bold text-white">Quản lý đăng nhập</Text>
+        <TouchableOpacity className="p-2" onPress={fetchSessions} disabled={isLoading}>
+          <Ionicons name="refresh" size={20} color={isLoading ? '#555' : '#00B0FF'} />
         </TouchableOpacity>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <View style={styles.infoSection}>
-          <Ionicons name="shield-checkmark-outline" size={40} color={Colors.accentIncome} style={{ marginBottom: 12 }} />
-          <Text style={styles.infoTitle}>Bảo mật tài khoản</Text>
-          <Text style={styles.infoDesc}> Danh sách các thiết bị hiện đang duy trì phiên đăng nhập vào tài khoản của bạn. Bạn có thể đăng xuất các thiết bị không nhận diện được.</Text>
+      <ScrollView contentContainerStyle={{ padding: 20 }} showsVerticalScrollIndicator={false}>
+        <View className="items-center mb-[30px] px-5">
+          <Ionicons name="shield-checkmark-outline" size={40} color="#00E676" className="mb-3" />
+          <Text className="text-xl font-bold text-white mb-2">Bảo mật tài khoản</Text>
+          <Text className="text-sm text-gray-500 text-center leading-5"> Danh sách các thiết bị hiện đang duy trì phiên đăng nhập vào tài khoản của bạn. Bạn có thể đăng xuất các thiết bị không nhận diện được.</Text>
         </View>
 
         {isLoading ? (
-          <ActivityIndicator size="large" color={Colors.accentBlue} style={{ marginTop: 40 }} />
+          <ActivityIndicator size="large" color="#00B0FF" className="mt-10" />
         ) : sessions.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyText}>Không tìm thấy phiên hoạt động nào.</Text>
+          <View className="items-center mt-[60px]">
+            <Text className="text-gray-500 text-base">Không tìm thấy phiên hoạt động nào.</Text>
           </View>
         ) : (
           sessions.map(session => (
@@ -153,56 +150,8 @@ export default function DeviceManagementScreen({ navigation }: any) {
           ))
         )}
         
-        <View style={{ height: 40 }} />
+        <View className="h-[40px]" />
       </ScrollView>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.bg },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingTop: 50,
-    paddingHorizontal: Spacing.lg,
-    paddingBottom: 15,
-    backgroundColor: 'rgba(0,0,0,0.2)',
-  },
-  backBtn: { padding: 8 },
-  headerTitle: { fontSize: FontSize.lg, fontWeight: '700', color: Colors.textPrimary },
-  refreshBtn: { padding: 8 },
-  scrollContent: { padding: Spacing.lg },
-  infoSection: { alignItems: 'center', marginBottom: 30, paddingHorizontal: 20 },
-  infoTitle: { fontSize: FontSize.xl, fontWeight: '700', color: Colors.textPrimary, marginBottom: 8 },
-  infoDesc: { fontSize: FontSize.sm, color: Colors.textTertiary, textAlign: 'center', lineHeight: 20 },
-  sessionCard: { marginBottom: Spacing.md },
-  sessionHeader: { flexDirection: 'row', alignItems: 'center' },
-  iconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  currentIconContainer: {
-    backgroundColor: 'rgba(33, 150, 243, 0.15)',
-  },
-  sessionInfo: { flex: 1 },
-  deviceName: { fontSize: FontSize.md, fontWeight: '600', color: Colors.textPrimary },
-  deviceModel: { fontSize: FontSize.xs, color: Colors.textTertiary, marginTop: 2 },
-  lastActive: { fontSize: 10, color: Colors.accentBlue, marginTop: 4 },
-  deleteBtn: { padding: 8 },
-  currentBadge: {
-    backgroundColor: Colors.accentIncome,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  currentBadgeText: { fontSize: 10, fontWeight: '700', color: Colors.white },
-  emptyState: { alignItems: 'center', marginTop: 60 },
-  emptyText: { color: Colors.textTertiary, fontSize: FontSize.md },
-});

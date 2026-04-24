@@ -6,6 +6,7 @@ import { Colors, BorderRadius, Spacing } from '../theme/colors';
 interface GlassBoxProps {
   children: React.ReactNode;
   style?: ViewStyle;
+  className?: string; // Support for NativeWind
   intensity?: number;
   borderRadius?: number;
   padding?: number;
@@ -18,13 +19,17 @@ interface GlassBoxProps {
 export const GlassBox: React.FC<GlassBoxProps> = ({
   children,
   style,
+  className,
   intensity = 35, // Reduced for lighter feel
   borderRadius = BorderRadius.lg,
   padding = Spacing.lg, // 12px
   overflow = 'hidden',
 }) => {
   return (
-    <View style={[styles.container, { borderRadius, overflow }, style]}>
+    <View 
+      className={className} 
+      style={[styles.container, { borderRadius, overflow }, style]}
+    >
       <BlurView 
         intensity={intensity} 
         tint="dark"

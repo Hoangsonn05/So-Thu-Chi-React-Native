@@ -6,6 +6,7 @@
 import { firestoreDb } from '../config/firebase';
 import db from '../database/DatabaseHelper';
 import { Transaction } from '../models/Transaction';
+import { transactionEvents } from './TransactionEvents';
 
 class FirebaseSyncService {
   private isSyncing = false;
@@ -27,6 +28,7 @@ class FirebaseSyncService {
         console.log('No transactions found on Cloud.');
         // If empty, we still clear local to maintain consistency
         await db.clearAllTransactions();
+        transactionEvents.emitChanged();
         return;
       }
 
@@ -65,6 +67,8 @@ class FirebaseSyncService {
       if (cloudTransactions.length > 0) {
         await db.addTransactions(cloudTransactions);
       }
+
+      transactionEvents.emitChanged();
       
       console.log(`Successfully synced ${cloudTransactions.length} transactions from Cloud.`);
     } catch (error) {
@@ -140,6 +144,7 @@ class FirebaseSyncService {
 
       // Mark as synced locally
       await db.markAsSynced([t.id]);
+      transactionEvents.emitChanged();
     } catch (error) {
       console.error(`FirebaseSyncService Error (pushSingle - ${prefix}):`, error);
       throw error;

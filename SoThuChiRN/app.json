@@ -17,7 +17,8 @@
         "backgroundColor": "#FFFFFF"
       },
       "package": "com.example.sothuchi",
-      "googleServicesFile": "./google-services.json"
+      "googleServicesFile": "./google-services.json",
+      "kotlinVersion": "2.0.21"
     },
     "plugins": [
       "@react-native-firebase/app",

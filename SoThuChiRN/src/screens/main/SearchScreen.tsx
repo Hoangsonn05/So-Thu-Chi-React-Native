@@ -1,24 +1,20 @@
-/**
- * SearchScreen.tsx
- * Real-time transaction search with Glassmorphism UI and PDF Export.
- */
-
 import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   TextInput,
   TouchableOpacity,
   FlatList,
   ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Spacing, BorderRadius, FontSize } from '../../theme/colors';
+import { Colors } from '../../theme/colors';
 import GlassBox from '../../components/GlassBox';
 import db from '../../database/DatabaseHelper';
 import { Transaction } from '../../models/Transaction';
 import { exportService } from '../../services/ExportService';
+import { getCategoryEmoji } from '../../config/categories';
+import { transactionEvents } from '../../services/TransactionEvents';
 
 export default function SearchScreen({ navigation }: any) {
   const [query, setQuery] = useState('');
@@ -27,6 +23,14 @@ export default function SearchScreen({ navigation }: any) {
 
   useEffect(() => {
     handleSearch();
+  }, [query]);
+
+  useEffect(() => {
+    const unsubscribe = transactionEvents.subscribe(() => {
+      handleSearch();
+    });
+
+    return unsubscribe;
   }, [query]);
 
   const handleSearch = async () => {
@@ -60,97 +64,114 @@ export default function SearchScreen({ navigation }: any) {
   };
 
   return (
-    <View style={styles.container}>
+    <View className="flex-1 bg-background">
       {/* Header with Back Button */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Ionicons name="chevron-back" size={24} color={Colors.textPrimary} />
+      <View className="flex-row items-center justify-between pt-[45px] px-6 mb-2">
+        <TouchableOpacity onPress={() => navigation.goBack()} className="p-1">
+          <Ionicons name="chevron-back" size={24} color="#FFF" />
         </TouchableOpacity>
-        <Text style={styles.title}>Tìm kiếm</Text>
-        {results.length > 0 && (
-          <TouchableOpacity onPress={handleExportPDF} style={styles.exportBtn}>
-            <Ionicons name="document-text-outline" size={24} color={Colors.accentBlue} />
+        <Text className="text-lg font-bold text-white">Tìm kiếm</Text>
+        {results.length > 0 ? (
+          <TouchableOpacity onPress={handleExportPDF} className="p-1">
+            <Ionicons name="document-text-outline" size={24} color="#00B0FF" />
           </TouchableOpacity>
-        )}
+        ) : <View className="w-8" />}
       </View>
 
-      {/* Search Input */}
-      <View style={styles.searchWrapper}>
-        <GlassBox style={styles.searchBox} padding={0} intensity={30}>
-          <View style={styles.inputInner}>
-            <Ionicons name="search" size={18} color={Colors.textTertiary} style={styles.searchIcon} />
-            <TextInput
-              style={styles.input}
-              placeholder="Tìm ghi chú, hạng mục..."
-              placeholderTextColor={Colors.textTertiary}
-              value={query}
-              onChangeText={setQuery}
-              autoFocus
-              selectionColor={Colors.accentBlue}
-            />
-            {query.length > 0 && (
-              <TouchableOpacity onPress={() => setQuery('')} style={styles.clearBtn}>
-                <Ionicons name="close-circle" size={16} color={Colors.textTertiary} />
-              </TouchableOpacity>
-            )}
-          </View>
-        </GlassBox>
+      {/* Search Input Bar - High Visibility Redesign */}
+      <View className="px-6 mb-4">
+        <View
+          className="h-12 bg-white/10 rounded-2xl flex-row items-center px-4 border border-white/5"
+        >
+          <TextInput
+            className="flex-1 text-base font-medium"
+            style={{ color: '#FFFFFF', paddingVertical: 0 }}
+            placeholder="Tìm kiếm giao dịch..."
+            placeholderTextColor="#666"
+            value={query}
+            onChangeText={setQuery}
+            autoFocus
+            cursorColor="#00B0FF"
+            selectionColor="rgba(0, 176, 255, 0.3)"
+            underlineColorAndroid="transparent"
+          />
+          {query.length > 0 && (
+            <TouchableOpacity onPress={() => setQuery('')} className="p-1">
+              <Ionicons name="close-circle" size={20} color="#666" />
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
-      {/* Persistent Summary Bar */}
-      <View style={styles.summaryWrapper}>
-        <GlassBox style={styles.summaryBox} padding={8} intensity={20}>
-          <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>Thu nhập</Text>
-            <Text style={[styles.summaryValue, { color: Colors.accentIncome }]} numberOfLines={1} adjustsFontSizeToFit>
-              +{totalIncome.toLocaleString()}đ
+      {/* Summary Section - 3 Column Layout from Mockup */}
+      <View className="px-6 mb-6">
+        <View className="flex-row justify-between items-center">
+          {/* Income Column */}
+          <View className="flex-1 items-center">
+            <Text className="text-[11px] text-gray-400 mb-1.5 font-medium">Thu nhập</Text>
+            <Text className="text-lg font-bold text-accent" numberOfLines={1}>
+              {totalIncome.toLocaleString()}đ
             </Text>
+            <View className="w-10 h-[3px] bg-accent rounded-full mt-1.5" />
           </View>
-          <View style={styles.summaryDivider} />
-          <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>Chi phí</Text>
-            <Text style={[styles.summaryValue, { color: Colors.accentExpense }]} numberOfLines={1} adjustsFontSizeToFit>
-              -{totalExpense.toLocaleString()}đ
+
+          {/* Spacer */}
+          <View className="w-[1px] h-8 bg-white/5" />
+
+          {/* Expense Column */}
+          <View className="flex-1 items-center">
+            <Text className="text-[11px] text-gray-400 mb-1.5 font-medium">Chi phí</Text>
+            <Text className="text-lg font-bold text-expense" numberOfLines={1}>
+              {totalExpense.toLocaleString()}đ
             </Text>
+            <View className="w-10 h-[3px] bg-expense rounded-full mt-1.5" />
           </View>
-          <View style={styles.summaryDivider} />
-          <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>Số dư</Text>
-            <Text style={[styles.summaryValue, { color: Colors.textPrimary }]} numberOfLines={1} adjustsFontSizeToFit>
-              {balance.toLocaleString()}đ
+
+          {/* Spacer */}
+          <View className="w-[1px] h-8 bg-white/5" />
+
+          {/* Total/Balance Column */}
+          <View className="flex-1 items-center">
+            <Text className="text-[11px] text-gray-400 mb-1.5 font-medium">Tổng</Text>
+            <Text className="text-lg font-bold text-accent" numberOfLines={1}>
+              {balance >= 0 ? '+' : ''}{balance.toLocaleString()}đ
             </Text>
+            <View className="w-10 h-[3px] bg-accent rounded-full mt-1.5" />
           </View>
-        </GlassBox>
+        </View>
+
+        {/* Underline separator for the whole section */}
+        <View className="w-full h-[1px] bg-white/5 mt-6" />
       </View>
 
       {/* Results List */}
       {isLoading ? (
-        <ActivityIndicator color={Colors.accentBlue} style={{ marginTop: 40 }} />
+        <ActivityIndicator color="#00B0FF" className="mt-10" />
       ) : (
         <FlatList
           data={results}
           keyExtractor={(_, index) => index.toString()}
-          contentContainerStyle={styles.listContent}
+          contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 6, paddingBottom: 40 }}
           ListEmptyComponent={
             query.length > 0 ? (
-              <View style={styles.emptyContainer}>
-                <Ionicons name="search-outline" size={48} color={Colors.glassBorder} />
-                <Text style={styles.emptyText}>Không tìm thấy kết quả</Text>
+              <View className="items-center mt-20">
+                <Ionicons name="search-outline" size={48} color="rgba(255,255,255,0.05)" />
+                <Text className="text-gray-500 mt-3 text-base">Không tìm thấy kết quả</Text>
               </View>
             ) : null
           }
           renderItem={({ item }) => (
-            <GlassBox style={styles.transactionItem} padding={12} intensity={20}>
-              <View style={styles.txRow}>
-                <View style={[styles.categoryIcon, { backgroundColor: item.type === 1 ? 'rgba(0, 230, 118, 0.1)' : 'rgba(255, 82, 82, 0.1)' }]}>
-                  <Text style={{ fontSize: 16 }}>{item.category.split(' ')[0]}</Text>
+            <GlassBox className="mb-2" padding={12} intensity={25}>
+              <View className="flex-row items-center justify-between">
+                <View className="w-9 h-9 items-center justify-center mr-2">
+                  <Text className="text-xl">{getCategoryEmoji(item.category)}</Text>
                 </View>
-                <View style={styles.txInfo}>
-                  <Text style={styles.txCategory} numberOfLines={1}>{item.category}</Text>
-                  <Text style={styles.txNote} numberOfLines={1}>{item.note || 'Không có ghi chú'}</Text>
-                  <Text style={styles.txDate}>{item.date}</Text>
+                <View className="flex-1 mr-2">
+                  <Text className="text-sm font-bold text-white" numberOfLines={1}>{item.category}</Text>
+                  <Text className="text-[10px] text-gray-400 mt-0.5" numberOfLines={1}>{item.note || 'Không có ghi chú'}</Text>
+                  <Text className="text-[8px] text-gray-600 mt-0.5">{item.date}</Text>
                 </View>
-                <Text style={[styles.txAmount, { color: item.type === 1 ? Colors.accentIncome : Colors.accentExpense }]}>
+                <Text className={`text-sm font-bold ${item.type === 1 ? 'text-income' : 'text-expense'}`}>
                   {item.type === 1 ? '+' : '-'}{item.amount.toLocaleString()}đ
                 </Text>
               </View>
@@ -161,41 +182,3 @@ export default function SearchScreen({ navigation }: any) {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.bg },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingTop: 45,
-    paddingHorizontal: Spacing.xl,
-    marginBottom: Spacing.sm,
-    justifyContent: 'space-between',
-  },
-  backBtn: { padding: 4 },
-  title: { fontSize: FontSize.lg, fontWeight: '700', color: Colors.textPrimary },
-  exportBtn: { padding: 4 },
-  searchWrapper: { paddingHorizontal: Spacing.xl, marginBottom: Spacing.sm },
-  searchBox: { height: 40, borderRadius: 10, overflow: 'hidden' },
-  inputInner: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10 },
-  searchIcon: { marginRight: 6 },
-  input: { flex: 1, color: Colors.textPrimary, fontSize: FontSize.sm, paddingVertical: 0 },
-  clearBtn: { padding: 4 },
-  summaryWrapper: { paddingHorizontal: Spacing.xl, marginBottom: Spacing.md },
-  summaryBox: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  summaryItem: { flex: 1, alignItems: 'center' },
-  summaryLabel: { fontSize: 9, color: Colors.textTertiary, textTransform: 'uppercase', marginBottom: 2 },
-  summaryValue: { fontSize: FontSize.sm, fontWeight: '700' },
-  summaryDivider: { width: 1, height: 15, backgroundColor: 'rgba(255, 255, 255, 0.1)' },
-  listContent: { paddingHorizontal: Spacing.xl, paddingTop: 6, paddingBottom: 40 },
-  transactionItem: { marginBottom: Spacing.xs },
-  txRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  categoryIcon: { width: 32, height: 32, borderRadius: 8, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
-  txInfo: { flex: 1, marginRight: 8, flexShrink: 1 },
-  txCategory: { fontSize: FontSize.xs, fontWeight: '600', color: Colors.textPrimary },
-  txNote: { fontSize: 10, color: Colors.textSecondary, marginTop: 1 },
-  txDate: { fontSize: 8, color: Colors.textTertiary, marginTop: 1 },
-  txAmount: { fontSize: FontSize.sm, fontWeight: '700', flexShrink: 0, textAlign: 'right' },
-  emptyContainer: { alignItems: 'center', marginTop: 100 },
-  emptyText: { color: Colors.textTertiary, marginTop: 12, fontSize: FontSize.md },
-});

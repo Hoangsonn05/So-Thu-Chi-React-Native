@@ -30,6 +30,5 @@ export const normalizeForSearch = (text: string): string => {
  */
 export const prepareSearchQuery = (query: string): string => {
   const normalized = normalizeForSearch(query);
-  // Replace multiple spaces with a single wildcard for SQL LIKE
-  return `%${normalized.replace(/\s+/g, '%')}%`;
+  return `%${normalized}%`;
 };

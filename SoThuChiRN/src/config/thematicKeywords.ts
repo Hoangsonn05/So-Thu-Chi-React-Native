@@ -45,10 +45,28 @@ export const THEMES: ThemeMapping[] = [
  */
 export const getRelatedCategories = (query: string): string[] => {
   const normalizedQuery = query.toLowerCase().trim();
+  if (!normalizedQuery) return [];
+  
+  const queryWords = normalizedQuery.split(/\s+/);
   const matchedThemes: string[] = [];
 
   THEMES.forEach((t) => {
-    const hasMatch = t.keywords.some((kw) => normalizedQuery.includes(kw) || kw.includes(normalizedQuery));
+    // Stricter matching: 
+    // 1. Check if any word in the query exactly matches a keyword
+    // 2. OR check if any keyword is present in the query as a whole word (using regex)
+    const hasMatch = t.keywords.some((kw) => {
+      // Direct exact word match
+      if (queryWords.includes(kw)) return true;
+      
+      // Handle multi-word keywords (e.g., 'thuc pham') using word boundary regex
+      if (kw.includes(' ')) {
+        const regex = new RegExp(`\\b${kw}\\b`, 'i');
+        return regex.test(normalizedQuery);
+      }
+      
+      return false;
+    });
+
     if (hasMatch) {
       matchedThemes.push(t.theme);
     }

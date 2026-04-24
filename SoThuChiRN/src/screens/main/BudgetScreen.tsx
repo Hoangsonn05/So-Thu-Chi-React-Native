@@ -1,20 +1,15 @@
-/**
- * BudgetScreen.tsx
- * Re-scaled Compact UI
- */
-
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   ScrollView,
   TouchableOpacity,
 } from 'react-native';
-import { Colors, Spacing, BorderRadius, FontSize } from '../../theme/colors';
+import { Colors } from '../../theme/colors';
 import GlassBox from '../../components/GlassBox';
 import db from '../../database/DatabaseHelper';
 import { Ionicons } from '@expo/vector-icons';
+import { transactionEvents } from '../../services/TransactionEvents';
 
 interface BudgetItem {
   categoryName: string;
@@ -71,27 +66,35 @@ export default function BudgetScreen() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  useEffect(() => {
+    const unsubscribe = transactionEvents.subscribe(() => {
+      loadData();
+    });
+
+    return unsubscribe;
+  }, [loadData]);
+
   const monthYear = `${String(month).padStart(2, '0')}/${year}`;
 
   return (
-    <View style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <Text style={styles.title}>Ngân sách</Text>
+    <View className="flex-1 bg-background">
+      <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 50 }} showsVerticalScrollIndicator={false}>
+        <Text className="text-3xl font-bold text-white mb-6">Ngân sách</Text>
 
-        <GlassBox style={styles.monthHeader} padding={10} intensity={30}>
+        <GlassBox className="flex-row items-center justify-between mb-4" padding={10} intensity={30}>
           <TouchableOpacity onPress={() => { if (month === 1) { setMonth(12); setYear(year - 1); } else setMonth(month - 1); }}>
-            <Ionicons name="chevron-back" size={20} color={Colors.textPrimary} />
+            <Ionicons name="chevron-back" size={20} color="#FFF" />
           </TouchableOpacity>
-          <Text style={styles.monthLabel}>{monthYear}</Text>
+          <Text className="text-lg font-bold text-white">{monthYear}</Text>
           <TouchableOpacity onPress={() => { if (month === 12) { setMonth(1); setYear(year + 1); } else setMonth(month + 1); }}>
-            <Ionicons name="chevron-forward" size={20} color={Colors.textPrimary} />
+            <Ionicons name="chevron-forward" size={20} color="#FFF" />
           </TouchableOpacity>
         </GlassBox>
 
         {budgetItems.map((item) => (
           <BudgetCard key={item.categoryName} item={item} />
         ))}
-        <View style={{ height: 100 }} />
+        <View className="h-[100px]" />
       </ScrollView>
     </View>
   );
@@ -100,54 +103,37 @@ export default function BudgetScreen() {
 function BudgetCard({ item }: { item: BudgetItem }) {
   const isWarning = item.percent >= 0.8 && item.percent < 1.0;
   const isAlert = item.percent >= 1.0;
-  const accentColor = isAlert ? Colors.accentExpense : isWarning ? Colors.warning : Colors.accentIncome;
+  
+  // Custom colors for status
+  const accentColor = isAlert ? '#FF5252' : isWarning ? '#FFD600' : '#00E676';
   const barWidth = Math.min(item.percent, 1.0) * 100;
 
   return (
-    <GlassBox style={styles.budgetCard} padding={12} intensity={20}>
-      <View style={styles.cardHeader}>
-        <Text style={styles.catName}>{item.categoryName}</Text>
-        <Text style={[styles.remaining, { color: isAlert ? Colors.accentExpense : Colors.textSecondary }]}>
+    <GlassBox className="mb-4" padding={12} intensity={20}>
+      <View className="flex-row justify-between items-center mb-2.5">
+        <Text className="text-lg font-bold text-white">{item.categoryName}</Text>
+        <Text className={`text-xs font-bold ${isAlert ? 'text-expense' : 'text-gray-400'}`}>
           Còn {formatCurrency(item.remaining)}đ
         </Text>
       </View>
 
-      <View style={styles.progressContainer}>
-        <View style={styles.progressBarBg}>
-          <View style={[styles.progressBarFill, { width: `${barWidth}%`, backgroundColor: accentColor }]} />
+      <View className="flex-row items-center gap-x-2.5 mb-3">
+        <View className="flex-1 h-1.5 rounded-full bg-white/5 overflow-hidden">
+          <View className="h-full rounded-full" style={{ width: `${barWidth}%`, backgroundColor: accentColor }} />
         </View>
-        <Text style={[styles.percentLabel, { color: accentColor }]}>{Math.round(item.percent * 100)}%</Text>
+        <Text className={`text-[10px] font-extrabold w-8`} style={{ color: accentColor }}>{Math.round(item.percent * 100)}%</Text>
       </View>
 
-      <View style={styles.cardFooter}>
+      <View className="flex-row justify-between">
         <View>
-          <Text style={styles.footerLabel}>Đã chi</Text>
-          <Text style={styles.footerValue}>{formatCurrency(item.spentAmount)}đ</Text>
+          <Text className="text-[10px] text-gray-500">Đã chi</Text>
+          <Text className="text-xs font-bold text-gray-400">{formatCurrency(item.spentAmount)}đ</Text>
         </View>
-        <View style={{ alignItems: 'flex-end' }}>
-          <Text style={styles.footerLabel}>Ngân sách</Text>
-          <Text style={styles.footerValue}>{formatCurrency(item.budgetAmount)}đ</Text>
+        <View className="items-end">
+          <Text className="text-[10px] text-gray-500">Ngân sách</Text>
+          <Text className="text-xs font-bold text-gray-400">{formatCurrency(item.budgetAmount)}đ</Text>
         </View>
       </View>
     </GlassBox>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.bg },
-  scrollContent: { paddingHorizontal: Spacing.xl, paddingTop: 50 },
-  title: { fontSize: FontSize.xxxl, fontWeight: '600', color: Colors.textPrimary, marginBottom: Spacing.lg },
-  monthHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: Spacing.md },
-  monthLabel: { fontSize: FontSize.lg, fontWeight: '600', color: Colors.textPrimary },
-  budgetCard: { marginBottom: Spacing.md },
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  catName: { fontSize: FontSize.lg, fontWeight: '600', color: Colors.textPrimary },
-  remaining: { fontSize: 12, fontWeight: '600' },
-  progressContainer: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
-  progressBarBg: { flex: 1, height: 6, borderRadius: 3, backgroundColor: 'rgba(255, 255, 255, 0.05)', overflow: 'hidden' },
-  progressBarFill: { height: '100%', borderRadius: 3 },
-  percentLabel: { fontSize: 10, fontWeight: '800', width: 30 },
-  cardFooter: { flexDirection: 'row', justifyContent: 'space-between' },
-  footerLabel: { fontSize: 10, color: Colors.textTertiary },
-  footerValue: { fontSize: 12, fontWeight: '600', color: Colors.textSecondary },
-});
