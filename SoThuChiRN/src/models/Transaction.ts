@@ -31,4 +31,6 @@ export interface UserProfile {
   email: string | null;
   phone: string | null;
   password: string | null;
+  username: string | null;
+  photoURL: string | null;
 }

@@ -30,7 +30,7 @@ export default function TelegramBotModal({ visible, onClose }: TelegramBotModalP
   // You can set the local server IP here if testing on emulator
   // Or use localhost for iOS emulator, 10.0.2.2 for Android emulator
   // However, the backend will use BASE_WEBHOOK_URL to set the webhook to Telegram.
-  // Sử dụng biến môi trường EXPO_PUBLIC_API_URL (Ngrok domain)
+  // Sử dụng biến môi trường EXPO_PUBLIC_API_URL (Production domain)
   const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL;
 
   const handleConnect = async () => {
@@ -87,7 +87,7 @@ export default function TelegramBotModal({ visible, onClose }: TelegramBotModalP
       // Hiển thị lỗi chi tiết lên màn hình điện thoại
       Alert.alert(
         'Lỗi kết nối mạng', 
-        `Nội dung: ${error.message}\n\nĐảm bảo Ngrok đang active và URL trong .env là chính xác.`
+        `Nội dung: ${error.message}\n\nĐảm bảo Server đang active và URL trong .env là chính xác.`
       );
     } finally {
       setIsLoading(false);

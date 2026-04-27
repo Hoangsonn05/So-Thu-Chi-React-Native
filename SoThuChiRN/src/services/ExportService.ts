@@ -135,7 +135,6 @@ class ExportService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'ngrok-skip-browser-warning': '69420', // Bypass ngrok warning page
         },
         body: JSON.stringify({ userId, userEmail }),
       });
@@ -156,7 +155,7 @@ class ExportService {
       }
     } catch (error: any) {
       console.error('Trigger Email Report Error:', error);
-      return { success: false, message: 'Không thể kết nối tới Server. Vui lòng kiểm tra Ngrok.' };
+      return { success: false, message: 'Không thể kết nối tới Server. Vui lòng kiểm tra lại sau.' };
     }
   }
 

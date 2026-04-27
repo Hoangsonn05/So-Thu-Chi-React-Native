@@ -95,10 +95,11 @@ export default function LoginScreen({ onNavigateToRegister, onLoginSuccess }: Lo
             data?.fullName ?? null,
             email,
             data?.phone ?? null,
-            password
+            password,
+            data?.username ?? null
           );
         } else {
-          await db.saveUserLocal(null, email, null, password);
+          await db.saveUserLocal(null, email, null, password, null);
         }
 
         syncService.pullTransactions(uid).catch((e: any) => {

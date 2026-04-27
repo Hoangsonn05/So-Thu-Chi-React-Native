@@ -24,6 +24,7 @@ import MainTabNavigator from './MainTabNavigator';
 import DeviceManagementScreen from '../screens/main/DeviceManagementScreen';
 import AllTimeReportScreen from '../screens/main/AllTimeReportScreen';
 import YearlyReportScreen from '../screens/main/YearlyReportScreen';
+import ProfileScreen from '../screens/main/ProfileScreen';
 import { Colors } from '../theme/colors';
 
 // Type definitions for navigation
@@ -38,6 +39,7 @@ export type RootStackParamList = {
   DeviceManager: undefined;
   AllTimeReport: undefined;
   YearlyReport: undefined;
+  ProfileDetail: undefined;
 };
 
 const AuthStack = createNativeStackNavigator<AuthStackParamList>();
@@ -96,6 +98,7 @@ export default function AppNavigator({
           <RootStack.Screen name="DeviceManager" component={DeviceManagementScreen} />
           <RootStack.Screen name="AllTimeReport" component={AllTimeReportScreen} />
           <RootStack.Screen name="YearlyReport" component={YearlyReportScreen} />
+          <RootStack.Screen name="ProfileDetail" component={ProfileScreen} />
         </>
       ) : (
         <RootStack.Screen name="Auth">

@@ -42,13 +42,15 @@ class SessionService {
       const deviceId = await this.getDeviceId();
       const deviceName = this.getDeviceName();
       
-      const sessionRef = firestoreDb()
+      const devicesRef = firestoreDb()
         .collection('users')
         .doc(uid)
-        .collection('devices')
-        .doc(deviceId);
+        .collection('devices');
 
-      await sessionRef.set({
+      // Check if session with this deviceId already exists (handles legacy random doc IDs)
+      const existingQuery = await devicesRef.where('deviceId', '==', deviceId).limit(1).get();
+      
+      const sessionData = {
         deviceId,
         deviceName,
         deviceModel: Device.modelName,
@@ -57,9 +59,17 @@ class SessionService {
         lastActive: firestoreDb.FieldValue.serverTimestamp(),
         appVersion: Application.nativeApplicationVersion || '1.0.0',
         status: 'active'
-      }, { merge: true });
+      };
 
-      console.log(`Session registered for device: ${deviceName} (${deviceId})`);
+      if (!existingQuery.empty) {
+        // Overwrite and update the existing session
+        await existingQuery.docs[0].ref.set(sessionData, { merge: true });
+        console.log(`Session updated for existing device: ${deviceName} (${deviceId})`);
+      } else {
+        // Create new session entry using deviceId as the document ID for future stability
+        await devicesRef.doc(deviceId).set(sessionData);
+        console.log(`New session registered for device: ${deviceName} (${deviceId})`);
+      }
     } catch (error) {
       console.error('Error registering session:', error);
     }

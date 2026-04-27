@@ -49,6 +49,7 @@ export default function RegisterScreen({ onNavigateToLogin, onRegisterSuccess }:
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [termsAccepted, setTermsAccepted] = useState(false);
@@ -74,7 +75,7 @@ export default function RegisterScreen({ onNavigateToLogin, onRegisterSuccess }:
     }
 
     // Validate all empty fields (từ DangkyActivity.java)
-    if (!fullName.trim() || !email.trim() || !phone.trim() || !password.trim()) {
+    if (!fullName.trim() || !email.trim() || !phone.trim() || !username.trim() || !password.trim()) {
       Alert.alert('Thông báo', 'Vui lòng nhập đầy đủ tất cả thông tin!');
       return;
     }
@@ -94,7 +95,7 @@ export default function RegisterScreen({ onNavigateToLogin, onRegisterSuccess }:
       await db.clearAllTransactions();
 
       // 1. Lưu SQLite local (giữ nguyên từ Java)
-      await db.saveUserLocal(fullName, email, phone, password);
+      await db.saveUserLocal(fullName, email, phone, password, username);
 
       // 2. Lưu Firestore (Cô lập UID) — giữ nguyên từ saveUserToFirestore trong Java
       await firestoreDb().collection('users').doc(userId).set(
@@ -102,6 +103,7 @@ export default function RegisterScreen({ onNavigateToLogin, onRegisterSuccess }:
           fullName,
           email,
           phone,
+          username,
           password,
           createdAt: firestoreDb.FieldValue.serverTimestamp(),
         },
@@ -188,6 +190,9 @@ export default function RegisterScreen({ onNavigateToLogin, onRegisterSuccess }:
           })}
           {renderInput('Số điện thoại', phone, setPhone, 'phone', {
             keyboardType: 'phone-pad',
+          })}
+          {renderInput('Tên người dùng (Username)', username, setUsername, 'username', {
+            autoCapitalize: 'none',
           })}
           {renderInput('Mật khẩu (tối thiểu 6 ký tự)', password, setPassword, 'password', {
             secureTextEntry: true,

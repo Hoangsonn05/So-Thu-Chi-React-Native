@@ -7,17 +7,13 @@
  * This file re‑exports the auth & firestore instances for convenience.
  */
 
-import auth, { FirebaseAuthTypes } from '@react-native-firebase/auth';
-import firestore, { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
+import auth from '@react-native-firebase/auth';
+import firestore from '@react-native-firebase/firestore';
+import storage from '@react-native-firebase/storage';
 
-// Firebase Auth instance
+// Export instances/functions
 export const firebaseAuth = auth;
-
-// Firestore instance
 export const firestoreDb = firestore;
+export const firebaseStorage = storage;
 
-// Type re-exports for convenience
-export type FirebaseUser = FirebaseAuthTypes.User;
-export type FirestoreDocument = FirebaseFirestoreTypes.DocumentSnapshot;
-
-export default { firebaseAuth, firestoreDb };
+export default { firebaseAuth, firestoreDb, firebaseStorage };

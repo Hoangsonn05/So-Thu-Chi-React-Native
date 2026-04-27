@@ -35,7 +35,7 @@ const OfflineStatusModal: React.FC<OfflineStatusModalProps> = ({ isVisible, onCo
         <BlurView intensity={20} tint="dark" style={StyleSheet.absoluteFill} />
         
         <View style={styles.container}>
-          <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
+          <BlurView intensity={90} tint="dark" style={StyleSheet.absoluteFill} />
           <View style={styles.content}>
             <View style={styles.iconContainer}>
               <View style={styles.iconPulse}>
@@ -85,8 +85,9 @@ const styles = StyleSheet.create({
     width: width - 48,
     borderRadius: 24,
     overflow: 'hidden',
-    borderWidth: 0.5,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+    backgroundColor: '#121212',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 10 },
     shadowOpacity: 0.3,
@@ -118,10 +119,11 @@ const styles = StyleSheet.create({
   },
   description: {
     fontSize: FontSize.md,
-    color: Colors.textTertiary,
+    color: Colors.spatialTextPrimary,
     textAlign: 'center',
     lineHeight: 22,
     marginBottom: 24,
+    fontWeight: '600',
   },
   buttonRow: {
     flexDirection: 'row',
@@ -147,14 +149,12 @@ const styles = StyleSheet.create({
     flex: 1,
     height: 48,
     borderRadius: BorderRadius.pill,
-    backgroundColor: 'rgba(0, 230, 118, 0.2)', // Mint xanh mờ
-    borderWidth: 1,
-    borderColor: 'rgba(0, 230, 118, 0.4)',
+    backgroundColor: Colors.primaryGreen,
     justifyContent: 'center',
     alignItems: 'center',
   },
   continueButtonText: {
-    color: Colors.primaryGreen,
+    color: Colors.white,
     fontSize: FontSize.md,
     fontWeight: '700',
   },

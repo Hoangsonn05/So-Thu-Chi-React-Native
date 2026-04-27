@@ -38,6 +38,8 @@ const COLUMN_U_NAME = 'full_name';
 const COLUMN_U_EMAIL = 'email';
 const COLUMN_U_PHONE = 'phone';
 const COLUMN_U_PASS = 'password';
+const COLUMN_U_USERNAME = 'username';
+const COLUMN_U_PHOTO = 'photo_url';
 
 class DatabaseHelper {
   private db: SQLite.SQLiteDatabase | null = null;
@@ -53,8 +55,8 @@ class DatabaseHelper {
     this.initPromise = (async () => {
       this.db = await SQLite.openDatabaseAsync(DATABASE_NAME);
 
-    // Create tables (giữ nguyên schema từ Java)
-    await this.db.execAsync(`
+      // Create tables (giữ nguyên schema từ Java)
+      await this.db.execAsync(`
       CREATE TABLE IF NOT EXISTS ${TABLE_TRANSACTIONS} (
         ${COLUMN_ID} INTEGER PRIMARY KEY AUTOINCREMENT,
         ${COLUMN_AMOUNT} INTEGER,
@@ -74,47 +76,77 @@ class DatabaseHelper {
         ${COLUMN_U_NAME} TEXT,
         ${COLUMN_U_EMAIL} TEXT,
         ${COLUMN_U_PHONE} TEXT,
-        ${COLUMN_U_PASS} TEXT
+        ${COLUMN_U_PASS} TEXT,
+        ${COLUMN_U_USERNAME} TEXT,
+        ${COLUMN_U_PHOTO} TEXT
       );
     `);
 
-    // Migration: Add COLUMN_SEARCH_CONTENT and COLUMN_IS_SYNCED if missing
-    try {
-      const tableInfo = await this.db.getAllAsync<any>(`PRAGMA table_info(${TABLE_TRANSACTIONS})`);
-      const hasSearchColumn = tableInfo.some((col: any) => 
-        col.name && col.name.toLowerCase() === COLUMN_SEARCH_CONTENT.toLowerCase()
-      );
-      const hasSyncColumn = tableInfo.some((col: any) => 
-        col.name && col.name.toLowerCase() === COLUMN_IS_SYNCED.toLowerCase()
-      );
-      
-      if (!hasSearchColumn) {
-        await this.db.execAsync(`ALTER TABLE ${TABLE_TRANSACTIONS} ADD COLUMN ${COLUMN_SEARCH_CONTENT} TEXT`);
-        // Migrate existing rows - populate normalized content
-        const rows = await this.db.getAllAsync<any>(`SELECT ${COLUMN_ID}, ${COLUMN_NOTE}, ${COLUMN_CATEGORY} FROM ${TABLE_TRANSACTIONS}`);
-        for (const row of rows) {
-          const content = ` ${normalizeForSearch(`${row.note} ${row.category}`)} `;
-          await this.db.runAsync(
-            `UPDATE ${TABLE_TRANSACTIONS} SET ${COLUMN_SEARCH_CONTENT} = ? WHERE ${COLUMN_ID} = ?`,
-            [content, row.id]
-          );
+      // Migration: Add COLUMN_SEARCH_CONTENT and COLUMN_IS_SYNCED if missing
+      try {
+        const tableInfo = await this.db.getAllAsync<any>(`PRAGMA table_info(${TABLE_TRANSACTIONS})`);
+        const hasSearchColumn = tableInfo.some((col: any) =>
+          col.name && col.name.toLowerCase() === COLUMN_SEARCH_CONTENT.toLowerCase()
+        );
+        const hasSyncColumn = tableInfo.some((col: any) =>
+          col.name && col.name.toLowerCase() === COLUMN_IS_SYNCED.toLowerCase()
+        );
+
+        if (!hasSearchColumn) {
+          await this.db.execAsync(`ALTER TABLE ${TABLE_TRANSACTIONS} ADD COLUMN ${COLUMN_SEARCH_CONTENT} TEXT`);
+          // Migrate existing rows - populate normalized content
+          const rows = await this.db.getAllAsync<any>(`SELECT ${COLUMN_ID}, ${COLUMN_NOTE}, ${COLUMN_CATEGORY} FROM ${TABLE_TRANSACTIONS}`);
+          for (const row of rows) {
+            const content = ` ${normalizeForSearch(`${row.note} ${row.category}`)} `;
+            await this.db.runAsync(
+              `UPDATE ${TABLE_TRANSACTIONS} SET ${COLUMN_SEARCH_CONTENT} = ? WHERE ${COLUMN_ID} = ?`,
+              [content, row.id]
+            );
+          }
+        }
+
+        if (!hasSyncColumn) {
+          // All existing transactions were probably fetched from cloud or already synced, default them to 1
+          await this.db.execAsync(`ALTER TABLE ${TABLE_TRANSACTIONS} ADD COLUMN ${COLUMN_IS_SYNCED} INTEGER DEFAULT 1`);
+        }
+      } catch (e: any) {
+        // Silently ignore "duplicate column name" as it means we are already in sync
+        if (e.message && e.message.includes('duplicate column name')) {
+          console.log('Search column already exists, skipping migration.');
+        } else {
+          console.error('Migration error:', e);
         }
       }
 
-      if (!hasSyncColumn) {
-        // All existing transactions were probably fetched from cloud or already synced, default them to 1
-        await this.db.execAsync(`ALTER TABLE ${TABLE_TRANSACTIONS} ADD COLUMN ${COLUMN_IS_SYNCED} INTEGER DEFAULT 1`);
+      // Migration: Add COLUMN_U_USERNAME to users table if missing
+      try {
+        const usersTableInfo = await this.db.getAllAsync<any>(`PRAGMA table_info(${TABLE_USERS})`);
+        const hasUsernameColumn = usersTableInfo.some((col: any) =>
+          col.name && col.name.toLowerCase() === COLUMN_U_USERNAME.toLowerCase()
+        );
+        if (!hasUsernameColumn) {
+          await this.db.execAsync(`ALTER TABLE ${TABLE_USERS} ADD COLUMN ${COLUMN_U_USERNAME} TEXT`);
+          console.log('Migration: Added username column to users table.');
+        }
+      } catch (e: any) {
+        console.error('Users migration error:', e);
       }
-    } catch (e: any) {
-      // Silently ignore "duplicate column name" as it means we are already in sync
-      if (e.message && e.message.includes('duplicate column name')) {
-        console.log('Search column already exists, skipping migration.');
-      } else {
-        console.error('Migration error:', e);
-      }
-    }
 
-    return this.db;
+      // Migration: Add COLUMN_U_PHOTO to users table if missing
+      try {
+        const usersTableInfo = await this.db.getAllAsync<any>(`PRAGMA table_info(${TABLE_USERS})`);
+        const hasPhotoColumn = usersTableInfo.some((col: any) =>
+          col.name && col.name.toLowerCase() === COLUMN_U_PHOTO.toLowerCase()
+        );
+        if (!hasPhotoColumn) {
+          await this.db.execAsync(`ALTER TABLE ${TABLE_USERS} ADD COLUMN ${COLUMN_U_PHOTO} TEXT`);
+          console.log('Migration: Added photo_url column to users table.');
+        }
+      } catch (e: any) {
+        console.error('Users photo migration error:', e);
+      }
+
+      return this.db;
     })();
 
     return this.initPromise;
@@ -281,13 +313,48 @@ class DatabaseHelper {
    * Lưu thông tin người dùng - chỉ hỗ trợ 1 user local
    * Giữ nguyên từ saveUserLocal trong Java
    */
-  async saveUserLocal(name: string | null, email: string | null, phone: string | null, pass: string | null): Promise<void> {
+  async saveUserLocal(name: string | null, email: string | null, phone: string | null, pass: string | null, username: string | null = null, photoURL: string | null = null): Promise<void> {
     const db = await this.open();
     // Xóa thông tin cũ trước khi lưu mới (app này hỗ trợ 1 user local)
     await db.runAsync(`DELETE FROM ${TABLE_USERS}`);
     await db.runAsync(
-      `INSERT INTO ${TABLE_USERS} (${COLUMN_U_NAME}, ${COLUMN_U_EMAIL}, ${COLUMN_U_PHONE}, ${COLUMN_U_PASS}) VALUES (?, ?, ?, ?)`,
-      [name ?? '', email ?? '', phone ?? '', pass ?? '']
+      `INSERT INTO ${TABLE_USERS} (${COLUMN_U_NAME}, ${COLUMN_U_EMAIL}, ${COLUMN_U_PHONE}, ${COLUMN_U_PASS}, ${COLUMN_U_USERNAME}, ${COLUMN_U_PHOTO}) VALUES (?, ?, ?, ?, ?, ?)`,
+      [name ?? '', email ?? '', phone ?? '', pass ?? '', username ?? '', photoURL ?? '']
+    );
+  }
+
+  /**
+   * Cập nhật một phần thông tin user local (partial update — không xóa toàn bộ)
+   * Dùng cho tính năng chỉnh sửa profile và đổi mật khẩu.
+   */
+  async updateUserLocal(fields: Partial<{ fullName: string; email: string; phone: string; password: string; username: string; photoURL: string }>): Promise<void> {
+    if (Object.keys(fields).length === 0) return;
+    const db = await this.open();
+
+    const columnMap: Record<string, string> = {
+      fullName: COLUMN_U_NAME,
+      email: COLUMN_U_EMAIL,
+      phone: COLUMN_U_PHONE,
+      password: COLUMN_U_PASS,
+      username: COLUMN_U_USERNAME,
+      photoURL: COLUMN_U_PHOTO,
+    };
+
+    const setClauses: string[] = [];
+    const values: any[] = [];
+
+    for (const [key, value] of Object.entries(fields)) {
+      const col = columnMap[key];
+      if (col) {
+        setClauses.push(`${col} = ?`);
+        values.push(value ?? '');
+      }
+    }
+
+    if (setClauses.length === 0) return;
+    await db.runAsync(
+      `UPDATE ${TABLE_USERS} SET ${setClauses.join(', ')} WHERE 1=1`,
+      values
     );
   }
 
@@ -302,6 +369,8 @@ class DatabaseHelper {
       email: string;
       phone: string;
       password: string;
+      username: string;
+      photo_url: string;
     }>(`SELECT * FROM ${TABLE_USERS} LIMIT 1`);
 
     if (!row) return null;
@@ -310,6 +379,8 @@ class DatabaseHelper {
       email: row.email,
       phone: row.phone,
       password: row.password,
+      username: row.username ?? null,
+      photoURL: row.photo_url ?? null,
     };
   }
 
@@ -338,13 +409,13 @@ class DatabaseHelper {
   async getDailySummariesInRange(dates: string[]): Promise<{ date: string, income: number, expense: number }[]> {
     const db = await this.open();
     const results = [];
-    
+
     for (const date of dates) {
       const income = await this.getSumByDate(date, 1);
       const expense = await this.getSumByDate(date, 0);
       results.push({ date, income, expense });
     }
-    
+
     return results;
   }
 
@@ -356,12 +427,12 @@ class DatabaseHelper {
    */
   async searchTransactions(query: string): Promise<Transaction[]> {
     const db = await this.open();
-    
+
     // 1. Chuẩn hóa truy vấn (không dấu)
     const normalizedQuery = normalizeForSearch(query);
     // 2. Lấy danh sách các hạng mục liên quan theo chủ đề
     const relatedCategories = getRelatedCategories(normalizedQuery);
-    
+
     let whereClause = `${COLUMN_SEARCH_CONTENT} LIKE ?`;
     let params: any[] = [`% ${normalizedQuery} %`];
 
@@ -371,7 +442,7 @@ class DatabaseHelper {
       whereClause += ` OR ${COLUMN_CATEGORY} IN (${categoryPlaceholders})`;
       params = [...params, ...relatedCategories];
     }
-    
+
     const rows = await db.getAllAsync<any>(
       `SELECT * FROM ${TABLE_TRANSACTIONS} WHERE ${whereClause} ORDER BY ${COLUMN_ID} DESC`,
       params
