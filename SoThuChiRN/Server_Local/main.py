@@ -40,7 +40,7 @@ BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL", "")
 print(f"🚀 [INIT] BASE_WEBHOOK_URL: {BASE_WEBHOOK_URL if BASE_WEBHOOK_URL else 'NOT FOUND'}")
 
 # --- CẤU HÌNH AI (GEMINI - KHỚP VỚI APP) ---
-GEMINI_API_KEY = "AIzaSyBk2tRqMVasNvZP13P9O5eymUiD-rSc31A"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBk2tRqMVasNvZP13P9O5eymUiD-rSc31A")
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent"
 
 # --- TIMEZONE Việt Nam (UTC+7) ---
@@ -783,4 +783,6 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # Render cấp biến PORT động, mặc định là 8000 nếu chạy local
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False if os.getenv("PORT") else True)
