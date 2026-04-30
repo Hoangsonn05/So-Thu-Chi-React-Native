@@ -17,7 +17,7 @@ import uvicorn
 import requests
 from openpyxl.styles import Border, Font, Side
 from openpyxl.utils import get_column_letter
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response
 from firebase_admin import credentials, firestore
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -307,38 +307,45 @@ def _send_email_with_attachment(to_email: str, attachment_path: str, filename: s
 
 @app.post("/api/export-email")
 def export_email(body: ExportEmailRequest):
-    if not os.path.isfile(FIREBASE_KEY_PATH):
-        raise HTTPException(status_code=500, detail="Thiếu firebase_key.json")
-
     try:
+        if not os.path.isfile(FIREBASE_KEY_PATH):
+            raise Exception("Thiếu firebase_key.json")
+
+        # Logic lấy dữ liệu
         rows = _fetch_transactions(body.userId)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi Firestore: {e!s}") from e
 
-    fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
-    os.close(fd)
-    filename = f"bao_cao_{body.userId}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
+        os.close(fd)
+        filename = f"bao_cao_{body.userId}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
-    try:
-        _build_excel(tmp_path, rows)
         try:
+            _build_excel(tmp_path, rows)
+            # Gửi email (nghiệp vụ chính)
             _send_email_with_attachment(body.userEmail, tmp_path, filename)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Lỗi gửi email: {e!s}") from e
-    finally:
-        if os.path.isfile(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+        finally:
+            if os.path.isfile(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
-    return {
-        "success": True,
-        "message": "Đã tạo file Excel và gửi email thành công.",
-        "userId": body.userId,
-        "recipient": body.userEmail,
-        "transactionCount": len(rows),
-    }
+        return {
+            "success": True,
+            "message": "Đã tạo file Excel và gửi email thành công.",
+            "userId": body.userId,
+            "recipient": body.userEmail,
+            "transactionCount": len(rows),
+        }
+    except Exception as e:
+        # In chi tiết lỗi ra server console
+        print("!!! ERROR IN /api/export-email !!!")
+        traceback.print_exc()
+        # Trả về Plain Text cho client
+        return Response(
+            content=f"INTERNAL SERVER ERROR: {str(e)}",
+            status_code=500,
+            media_type="text/plain"
+        )
 
 
 # ==========================================
