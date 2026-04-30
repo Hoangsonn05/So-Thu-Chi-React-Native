@@ -28,12 +28,12 @@ FIREBASE_KEY_PATH = os.path.join(BASE_DIR, "firebase_key.json")
 # Load environment variables from .env file in the same directory (with override)
 load_dotenv(os.path.join(BASE_DIR, '.env'), override=True)
 
-# --- CẤU HÌNH EMAIL ---
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-GMAIL_USER = "sothuchi3@gmail.com"
-GMAIL_APP_PASSWORD = "tflj trrq ixes hhux"
-EMAIL_FROM_NAME = "Báo cáo giao dịch"
+# --- CẤU HÌNH EMAIL (Sử dụng Environment Variables) ---
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))  # Cổng 465 cho SMTP_SSL
+GMAIL_USER = os.getenv("GMAIL_USER")            # Bắt buộc cấu hình trên Render
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")  # Bắt buộc cấu hình trên Render
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Báo cáo giao dịch")
 
 # --- CẤU HÌNH WEBHOOK (Động cho từng User) ---
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL", "")
@@ -299,8 +299,8 @@ def _send_email_with_attachment(to_email: str, attachment_path: str, filename: s
     part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
     msg.attach(part)
 
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-        server.starttls()
+    # Sử dụng SMTP_SSL để khắc phục lỗi Network unreachable (Error 101)
+    with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
         server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
         server.sendmail(GMAIL_USER, [to_email], msg.as_string())
 
