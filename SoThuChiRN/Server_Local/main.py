@@ -4,6 +4,16 @@ import json
 import smtplib
 import tempfile
 import traceback
+import socket
+
+# --- MONKEY PATCH: Ép sử dụng IPv4 để fix lỗi [Errno 101] trên Render ---
+_old_getaddrinfo = socket.getaddrinfo
+def _new_getaddrinfo(*args, **kwargs):
+    responses = _old_getaddrinfo(*args, **kwargs)
+    return [response for response in responses if response[0] == socket.AF_INET]
+socket.getaddrinfo = _new_getaddrinfo
+# -----------------------------------------------------------------------
+
 from datetime import datetime, timezone, timedelta
 from email import encoders
 from email.mime.base import MIMEBase
