@@ -1,24 +1,10 @@
 import os
 import re
 import json
-import smtplib
 import tempfile
 import traceback
-import socket
-
-# --- MONKEY PATCH: Ép sử dụng IPv4 để fix lỗi [Errno 101] trên Render ---
-_old_getaddrinfo = socket.getaddrinfo
-def _new_getaddrinfo(*args, **kwargs):
-    responses = _old_getaddrinfo(*args, **kwargs)
-    return [response for response in responses if response[0] == socket.AF_INET]
-socket.getaddrinfo = _new_getaddrinfo
-# -----------------------------------------------------------------------
-
+import resend
 from datetime import datetime, timezone, timedelta
-from email import encoders
-from email.mime.base import MIMEBase
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from typing import Any, Optional
 
 import firebase_admin
@@ -38,12 +24,8 @@ FIREBASE_KEY_PATH = os.path.join(BASE_DIR, "firebase_key.json")
 # Load environment variables from .env file in the same directory (with override)
 load_dotenv(os.path.join(BASE_DIR, '.env'), override=True)
 
-# --- CẤU HÌNH EMAIL (Sử dụng Environment Variables) ---
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))  # Cổng 465 cho SMTP_SSL
-GMAIL_USER = os.getenv("GMAIL_USER")            # Bắt buộc cấu hình trên Render
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")  # Bắt buộc cấu hình trên Render
-EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Báo cáo giao dịch")
+# --- CẤU HÌNH RESEND (Gửi Email) ---
+resend.api_key = os.getenv("RESEND_API_KEY")
 
 # --- CẤU HÌNH WEBHOOK (Động cho từng User) ---
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL", "")
@@ -296,23 +278,26 @@ def _build_excel(path: str, rows: list[dict[str, Any]]) -> None:
             ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 60)
 
 def _send_email_with_attachment(to_email: str, attachment_path: str, filename: str) -> None:
-    msg = MIMEMultipart()
-    msg["Subject"] = "Báo cáo Excel giao dịch"
-    msg["From"] = f"{EMAIL_FROM_NAME} <{GMAIL_USER}>"
-    msg["To"] = to_email
-    msg.attach(MIMEText("Đính kèm file báo cáo Excel theo yêu cầu.", "plain", "utf-8"))
-
+    # 1. Đọc nội dung file báo cáo (chuyển sang list số nguyên cho Resend)
     with open(attachment_path, "rb") as f:
-        part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        part.set_payload(f.read())
-    encoders.encode_base64(part)
-    part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
-    msg.attach(part)
+        file_content = list(f.read())
 
-    # Sử dụng SMTP_SSL để khắc phục lỗi Network unreachable (Error 101)
-    with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
-        server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_USER, [to_email], msg.as_string())
+    # 2. Cấu hình tham số gửi mail qua Resend HTTP API
+    params = {
+        "from": "Sổ Thu Chi <onboarding@resend.dev>",
+        "to": [to_email],
+        "subject": "Báo cáo dữ liệu Thu Chi",
+        "html": "<strong>Đính kèm file báo cáo Excel theo yêu cầu.</strong>",
+        "attachments": [
+            {
+                "filename": filename,
+                "content": file_content,
+            }
+        ],
+    }
+
+    # 3. Thực hiện gửi
+    resend.Emails.send(params)
 
 
 @app.post("/api/export-email")
