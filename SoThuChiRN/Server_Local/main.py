@@ -484,12 +484,19 @@ def analyze_text_with_gemini(user_text: str) -> dict:
         ]
     }
 
-    response = requests.post(
-        f"{GEMINI_API_URL}?key={GEMINI_API_KEY}",
-        json=payload,
-        headers={"Content-Type": "application/json"},
-        timeout=30,
-    )
+    try:
+        response = requests.post(
+            f"{GEMINI_API_URL}?key={GEMINI_API_KEY}",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=60,
+        )
+    except requests.exceptions.ReadTimeout:
+        print("[Gemini Timeout] AI không phản hồi kịp trong 60s")
+        return "ERROR_TIMEOUT"
+    except Exception as e:
+        print(f"[Gemini Request Error] {e}")
+        raise e
     
     if response.status_code != 200:
         print(f"\n====== GEMINI API ERROR ({response.status_code}) ======")
@@ -708,6 +715,12 @@ def process_ai_and_save(bot_token: str, firebase_uid: str, chat_id: int, text: s
 
         # 2. Gọi AI — NGOÀI transaction
         parsed = analyze_text_with_gemini(text)
+        
+        if parsed == "ERROR_TIMEOUT":
+            overload_msg = "❌ Xin lỗi bạn, hệ thống AI của Google hiện đang quá tải. Bạn vui lòng thử lại sau ít phút nhé!"
+            send_telegram_message(bot_token, chat_id, overload_msg)
+            return
+
         print(f"[AI Result] {parsed}")
 
         # 3. Build payload — NGOÀI transaction
@@ -772,6 +785,10 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
         elif text.lower() == "/help":
             background_tasks.add_task(_handle_help_command, bot_token, chat_id)
         else:
+            # Phản hồi ngay lập tức để cải thiện UX
+            waiting_msg = "⏳ Bot đã lắng nghe yêu cầu của bạn rồi ạ , vui lòng đợi 1 xíu nha..."
+            send_telegram_message(bot_token, chat_id, waiting_msg)
+            
             background_tasks.add_task(process_ai_and_save, bot_token, firebase_uid, chat_id, text)
 
     return {"status": "ok"}
