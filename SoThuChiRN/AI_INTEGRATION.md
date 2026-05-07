@@ -59,7 +59,7 @@ App.tsx (Root)
 
 ### 4. **gemini-client.ts**
 - **Purpose**: HTTP client for Gemini API
-- **Model**: `gemini-2.5-flash-lite`
+- **Model**: `gemma-4-26b-a4b-it`
 - **API Key**: `AIzaSyBk2tRqMVasNvZP13P9O5eymUiD-rSc31A`
 - **Response Parsing**:
   - Extracts text from `candidates[0].content.parts[0].text`
@@ -300,7 +300,7 @@ src/
   - Voice input handling → `AIChatModal voice button`
 
 **Prompt Consistency**:
-- Same Gemini model (gemini-2.5-flash-lite)
+- Same Gemini model (gemma-4-26b-a4b-it)
 - Same API endpoint
 - Same API key
 - Same response JSON structure
