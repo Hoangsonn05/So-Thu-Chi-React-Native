@@ -31,9 +31,10 @@ resend.api_key = os.getenv("RESEND_API_KEY")
 BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL", "")
 print(f"🚀 [INIT] BASE_WEBHOOK_URL: {BASE_WEBHOOK_URL if BASE_WEBHOOK_URL else 'NOT FOUND'}")
 
-# --- CẤU HÌNH AI (GEMINI - KHỚP VỚI APP) ---
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBk2tRqMVasNvZP13P9O5eymUiD-rSc31A")
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+# --- CẤU HÌNH AI (OPENROUTER - THAY THẾ GEMINI) ---
+OPENROUTER_API_KEY = "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"
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b:free"
 
 # --- TIMEZONE Việt Nam (UTC+7) ---
 VN_TZ = timezone(timedelta(hours=7))
@@ -61,8 +62,8 @@ CATEGORY_EMOJIS = {
     "Khác": "📦",
 }
 
-# --- SYSTEM PROMPT CHO GEMINI (ENGLISH — enforces exact app schema) ---
-GEMINI_SYSTEM_PROMPT = """You are a strict financial data extraction engine for a Vietnamese personal finance app called "Sổ Thu Chi".
+# --- SYSTEM PROMPT CHO AI (ENGLISH — enforces exact app schema) ---
+AI_SYSTEM_PROMPT = """You are a strict financial data extraction engine for a Vietnamese personal finance app called "Sổ Thu Chi".
 Your ONLY job is to parse the user's Vietnamese text message and extract financial transaction details into a JSON object.
 
 ## RULES — FOLLOW EXACTLY:
@@ -463,53 +464,58 @@ async def setup_telegram_bot(request: TelegramSetupRequest):
 
 def analyze_text_with_gemini(user_text: str) -> dict:
     """
-    Gọi trực tiếp Google Gemini API (giống với app).
-    Sử dụng System Prompt cũ để đảm bảo hiệu suất parse tốt nhất.
+    Gọi trực tiếp OpenRouter API (Thay thế Gemini).
     """
     now_vn = datetime.now(tz=VN_TZ)
     today_str = now_vn.strftime("%d/%m/%Y")
 
-    # Tạo prompt từ template (chỉ dùng current_date cho prompt tiếng Anh này)
-    system_prompt = GEMINI_SYSTEM_PROMPT.format(current_date=today_str)
+    # Tạo prompt từ template
+    system_prompt = AI_SYSTEM_PROMPT.format(current_date=today_str)
     
     full_prompt = f"{system_prompt}\n\nUSER INPUT: \"{user_text}\"\n\nJSON OUTPUT:"
 
     payload = {
-        "contents": [
+        "model": MODEL_NAME,
+        "messages": [
             {
-                "parts": [
-                    {"text": full_prompt}
-                ]
+                "role": "user",
+                "content": full_prompt
             }
         ]
     }
 
     try:
         response = requests.post(
-            f"{GEMINI_API_URL}?key={GEMINI_API_KEY}",
+            OPENROUTER_API_URL,
             json=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://github.com/Hoangsonn05/So-Thu-Chi-React-Native",
+                "X-Title": "So Thu Chi App"
+            },
             timeout=60,
         )
     except requests.exceptions.ReadTimeout:
-        print("[Gemini Timeout] AI không phản hồi kịp trong 60s")
+        print("[OpenRouter Timeout] AI không phản hồi kịp trong 60s")
         return "ERROR_TIMEOUT"
     except Exception as e:
-        print(f"[Gemini Request Error] {e}")
+        print(f"[OpenRouter Request Error] {e}")
         raise e
     
     if response.status_code != 200:
-        print(f"\n====== GEMINI API ERROR ({response.status_code}) ======")
+        print(f"\n====== OPENROUTER API ERROR ({response.status_code}) ======")
         print(f"Details: {response.text}")
-        print("========================================================\n")
-        raise Exception(f"Gemini API rejected the request. Error: {response.text}")
+        print("==========================================================\n")
+        raise Exception(f"OpenRouter API rejected the request. Error: {response.text}")
 
     result = response.json()
     
     try:
-        raw_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
+        # OpenAI style response: choices[0].message.content
+        raw_text = result['choices'][0]['message']['content'].strip()
     except (KeyError, IndexError) as e:
-        print(f"[Gemini Response Error] Could not extract text: {e}")
+        print(f"[OpenRouter Response Error] Could not extract text: {e}")
         raise ValueError("AI trả về định dạng không mong muốn.")
 
     if not raw_text:
