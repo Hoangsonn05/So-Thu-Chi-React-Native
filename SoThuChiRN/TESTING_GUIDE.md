@@ -264,7 +264,7 @@ Notes: _________________________________
 
 **Network Request**:
 ```
-URL: https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-latest:generateContent?key=AIzaSy...
+URL: https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=AIzaSy...
 Method: POST
 Body: { contents: [ { parts: [ { text: "..." } ] } ] }
 Response: 200 OK
