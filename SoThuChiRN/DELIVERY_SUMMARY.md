@@ -117,9 +117,9 @@ Tính năng **Trợ Lý AI** đã được khôi phục hoàn toàn với giao d
 
 ### API Configuration
 - **Provider**: Google Gemini
-- **Model**: gemini-flash-lite-latest
+- **Model**: gemini-1.5-flash
 - **API Key**: AIzaSyBk2tRqMVasNvZP13P9O5eymUiD-rSc31A (same as original)
-- **Endpoint**: https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent
+- **Endpoint**: https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent
 
 ### Data Handling
 - Conversation history: In-memory only

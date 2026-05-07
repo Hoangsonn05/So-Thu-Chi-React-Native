@@ -33,7 +33,7 @@ print(f"🚀 [INIT] BASE_WEBHOOK_URL: {BASE_WEBHOOK_URL if BASE_WEBHOOK_URL else
 
 # --- CẤU HÌNH AI (GEMINI - KHỚP VỚI APP) ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBk2tRqMVasNvZP13P9O5eymUiD-rSc31A")
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 # --- TIMEZONE Việt Nam (UTC+7) ---
 VN_TZ = timezone(timedelta(hours=7))
