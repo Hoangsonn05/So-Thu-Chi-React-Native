@@ -32,6 +32,7 @@ import {
   parseAIResponse,
 } from '../services/AIAssistantService';
 import { AI_CONFIG } from '../config/AIConfig';
+import { useVoiceRecognition } from '../hooks/useVoiceRecognition';
 
 interface AIChatModalProps {
   isVisible: boolean;
@@ -63,7 +64,15 @@ const AIChatModal: React.FC<AIChatModalProps> = ({
       timestamp: number;
     }>
   >([]);
-  const [isListening, setIsListening] = useState(false);
+  
+  const {
+    isRecording: isVoiceRecording,
+    recognizedText,
+    error: voiceError,
+    startRecording: startVoiceRecording,
+    stopRecording: stopVoiceRecording,
+  } = useVoiceRecognition();
+
   const scrollViewRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const sheetY = useRef(new Animated.Value(SCREEN_HEIGHT)).current; // Unified vertical position
@@ -156,6 +165,20 @@ const AIChatModal: React.FC<AIChatModalProps> = ({
     }, 100);
   }, [messages]);
 
+  // Sync recognized voice text to input
+  useEffect(() => {
+    if (recognizedText) {
+      setInput(recognizedText);
+    }
+  }, [recognizedText]);
+
+  // Handle voice recording errors
+  useEffect(() => {
+    if (voiceError) {
+      alert(`Lỗi Micro: ${voiceError}`);
+    }
+  }, [voiceError]);
+
   const handleSubmit = async () => {
     if (!input.trim() || isProcessing) return;
 
@@ -221,16 +244,10 @@ const AIChatModal: React.FC<AIChatModalProps> = ({
   };
 
   const handleVoicePress = async () => {
-    setIsListening(true);
-    try {
-      // Note: Voice transcription requires Speech Recognition API
-      // In a real app, integrate react-native-speech-recognizer or similar
-      // For now, this is a placeholder
-      alert('Voice input feature requires platform-specific setup');
-    } catch (error) {
-      console.error('Voice input error:', error);
-    } finally {
-      setIsListening(false);
+    if (isVoiceRecording) {
+      await stopVoiceRecording();
+    } else {
+      await startVoiceRecording();
     }
   };
 
@@ -450,16 +467,16 @@ const AIChatModal: React.FC<AIChatModalProps> = ({
                 <Pressable
                   style={[
                     styles.voiceButton,
-                    isListening && styles.voiceButtonActive,
+                    isVoiceRecording && styles.voiceButtonActive,
                   ]}
                   onPress={handleVoicePress}
                   disabled={isProcessing}
                   hitSlop={8}
                 >
                   <MaterialIcons
-                    name={isListening ? 'mic' : 'mic-none'}
+                    name={isVoiceRecording ? 'mic' : 'mic-none'}
                     size={22}
-                    color={isListening ? '#FF3B30' : '#7C4DFF'}
+                    color={isVoiceRecording ? '#FF3B30' : '#7C4DFF'}
                   />
                 </Pressable>
               </View>

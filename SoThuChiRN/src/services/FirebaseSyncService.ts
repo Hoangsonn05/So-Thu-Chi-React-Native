@@ -1,23 +1,179 @@
 /**
  * FirebaseSyncService.ts
  * Centralized logic for bi-directional synchronization between SQLite and Firebase Firestore.
+ *
+ * ──────────────────────────────────────────────────────────────────────────────
+ * REAL-TIME LISTENER (startRealtimeListener / stopRealtimeListener)
+ * ──────────────────────────────────────────────────────────────────────────────
+ * Khi Telegram Bot (hoặc bất kỳ thiết bị nào khác) push dữ liệu lên Firestore,
+ * onSnapshot sẽ phát hiện ngay lập tức và:
+ *   1. Chỉ xử lý các document type "added" (document mới).
+ *   2. Bỏ qua document nếu deviceId khớp với thiết bị hiện tại
+ *      (tức là chính app đã push → đã có trong SQLite, không insert lại).
+ *   3. Insert document mới vào SQLite.
+ *   4. Gọi transactionEvents.emitChanged() → tất cả màn hình tự refresh.
  */
 
 import { firestoreDb } from '../config/firebase';
 import db from '../database/DatabaseHelper';
 import { Transaction } from '../models/Transaction';
 import { transactionEvents } from './TransactionEvents';
+import * as Application from 'expo-application';
+
+// Firestore unsubscribe function — giữ tham chiếu để hủy khi logout
+type Unsubscribe = () => void;
 
 class FirebaseSyncService {
   private isSyncing = false;
+  private realtimeUnsubscribe: Unsubscribe | null = null;
+
+  // ─── Device ID helpers ───────────────────────────────────────────────────────
+  /**
+   * Lấy Device ID an toàn. Dùng để filter tránh insert duplicate
+   * khi chính app push lên Firestore và onSnapshot fires lại.
+   */
+  private async getDeviceId(): Promise<string> {
+    try {
+      // expo-application: getAndroidId() trên Android
+      const id = Application.getAndroidId();
+      return id ?? 'unknown_device';
+    } catch {
+      return 'unknown_device';
+    }
+  }
+
+  // ─── Real-time Listener ───────────────────────────────────────────────────────
 
   /**
-   * Pull all transactions from Firestore and replace local SQLite data.
-   * This is used during login and manual "Pull from Cloud" triggers.
+   * Bắt đầu lắng nghe thay đổi real-time từ Firestore.
+   * Gọi sau khi user đăng nhập thành công.
+   * Tự động hủy listener cũ nếu đã tồn tại.
+   */
+  startRealtimeListener(uid: string): void {
+    // Hủy listener cũ nếu có (ví dụ: switch account)
+    this.stopRealtimeListener();
+
+    console.log('[FirebaseSync] Starting real-time Firestore listener...');
+
+    const collectionRef = firestoreDb()
+      .collection('users')
+      .doc(uid)
+      .collection('transactions');
+
+    this.realtimeUnsubscribe = collectionRef.onSnapshot(
+      async (snapshot) => {
+        // Chỉ xử lý document ĐƯỢC THÊM MỚI (không xử lý modified/removed)
+        const addedChanges = snapshot.docChanges().filter(
+          (change) => change.type === 'added'
+        );
+
+        if (addedChanges.length === 0) return;
+
+        const currentDeviceId = await this.getDeviceId();
+        let hasNewData = false;
+
+        for (const change of addedChanges) {
+          const data = change.doc.data();
+          const docId = change.doc.id;
+
+          // ── Kiểm tra tránh duplicate ──────────────────────────────────────
+          // Nếu document do chính thiết bị này push (sync_xxx / legacy_xxx)
+          // thì bỏ qua vì đã tồn tại trong SQLite.
+          const docDeviceId: string = data.deviceId || '';
+          const isFromThisDevice =
+            docDeviceId !== 'telegram_bot' &&
+            docDeviceId !== '' &&
+            docDeviceId === currentDeviceId;
+
+          if (isFromThisDevice) {
+            console.log(`[FirebaseSync] Skipping own doc: ${docId}`);
+            continue;
+          }
+
+          // ── Parse date từ Firestore ──────────────────────────────────────
+          let dateStr = '';
+          if (data.date && typeof data.date === 'string') {
+            // Ưu tiên field "date" (dd/MM/yyyy) — đúng format app
+            dateStr = data.date;
+          } else if (data.timestamp) {
+            try {
+              const dateObj = data.timestamp.toDate();
+              const day = String(dateObj.getDate()).padStart(2, '0');
+              const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+              const year = dateObj.getFullYear();
+              dateStr = `${day}/${month}/${year}`;
+            } catch {
+              dateStr = new Date().toLocaleDateString('vi-VN').replace(/\//g, '/');
+            }
+          }
+
+          if (!dateStr) {
+            const now = new Date();
+            dateStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`;
+          }
+
+          const newTransaction: Transaction = {
+            amount: Number(data.amount) || 0,
+            note: String(data.note || ''),
+            category: String(data.category || 'Khác'),
+            date: dateStr,
+            type: Number(data.type) === 1 ? 1 : 0,
+            createdBy: String(data.createdBy || uid),
+            deviceName: String(data.deviceName || ''),
+            deviceId: String(data.deviceId || ''),
+          };
+
+          // Bỏ qua giao dịch không hợp lệ
+          if (newTransaction.amount <= 0) {
+            console.warn(`[FirebaseSync] Skipping invalid amount doc: ${docId}`);
+            continue;
+          }
+
+          try {
+            await db.addTransaction(newTransaction);
+            hasNewData = true;
+            console.log(
+              `[FirebaseSync] ✅ Inserted from Firestore: ${docId} | ${newTransaction.category} | ${newTransaction.amount}`
+            );
+          } catch (insertErr) {
+            console.error(`[FirebaseSync] Insert error for ${docId}:`, insertErr);
+          }
+        }
+
+        // Chỉ emit event nếu thực sự có dữ liệu mới được insert
+        if (hasNewData) {
+          transactionEvents.emitChanged();
+          console.log('[FirebaseSync] 🔔 UI refresh triggered.');
+        }
+      },
+      (error) => {
+        // Lỗi mạng / permission — không crash app
+        console.error('[FirebaseSync] onSnapshot error:', error);
+      }
+    );
+
+    console.log('[FirebaseSync] Real-time listener started ✅');
+  }
+
+  /**
+   * Hủy real-time listener. Gọi khi user đăng xuất.
+   */
+  stopRealtimeListener(): void {
+    if (this.realtimeUnsubscribe) {
+      this.realtimeUnsubscribe();
+      this.realtimeUnsubscribe = null;
+      console.log('[FirebaseSync] Real-time listener stopped.');
+    }
+  }
+
+  // ─── One-shot Pull (dùng khi login / manual sync) ────────────────────────────
+
+  /**
+   * Pull all transactions từ Firestore và thay thế dữ liệu SQLite cục bộ.
+   * Dùng khi đăng nhập và khi user bấm "Pull from Cloud".
    */
   async pullTransactions(uid: string): Promise<void> {
     try {
-      // 1. Fetch from Firestore (users/{uid}/transactions)
       const snapshot = await firestoreDb()
         .collection('users')
         .doc(uid)
@@ -26,7 +182,6 @@ class FirebaseSyncService {
 
       if (snapshot.empty) {
         console.log('No transactions found on Cloud.');
-        // If empty, we still clear local to maintain consistency
         await db.clearAllTransactions();
         transactionEvents.emitChanged();
         return;
@@ -35,17 +190,25 @@ class FirebaseSyncService {
       const cloudTransactions: Transaction[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
-        
-        // Parse timestamp to dd/MM/yyyy
+
         let dateStr = '';
-        if (data.timestamp) {
-          const dateObj = data.timestamp.toDate();
-          const day = String(dateObj.getDate()).padStart(2, '0');
-          const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-          const year = dateObj.getFullYear();
-          dateStr = `${day}/${month}/${year}`;
-        } else if (data.date) {
-            dateStr = data.date;
+        if (data.date && typeof data.date === 'string') {
+          dateStr = data.date;
+        } else if (data.timestamp) {
+          try {
+            const dateObj = data.timestamp.toDate();
+            const day = String(dateObj.getDate()).padStart(2, '0');
+            const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+            const year = dateObj.getFullYear();
+            dateStr = `${day}/${month}/${year}`;
+          } catch {
+            dateStr = '';
+          }
+        }
+
+        if (!dateStr) {
+          const now = new Date();
+          dateStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`;
         }
 
         cloudTransactions.push({
@@ -60,16 +223,13 @@ class FirebaseSyncService {
         });
       });
 
-      // 2. Clear local transactions
       await db.clearAllTransactions();
 
-      // 3. Batch insert cloud data into SQLite
       if (cloudTransactions.length > 0) {
         await db.addTransactions(cloudTransactions);
       }
 
       transactionEvents.emitChanged();
-      
       console.log(`Successfully synced ${cloudTransactions.length} transactions from Cloud.`);
     } catch (error) {
       console.error('FirebaseSyncService Error (pull):', error);
@@ -77,9 +237,10 @@ class FirebaseSyncService {
     }
   }
 
+  // ─── Push ─────────────────────────────────────────────────────────────────────
+
   /**
-   * Push local transactions to Firestore.
-   * Currently used to 'upload' local state to the cloud.
+   * Push toàn bộ giao dịch local lên Firestore.
    */
   async pushTransactions(uid: string): Promise<void> {
     try {
@@ -91,9 +252,9 @@ class FirebaseSyncService {
 
       localTransactions.forEach((t, index) => {
         const [dd, mm, yyyy] = (t.date || '01/01/2024').split('/');
-        const docId = `sync_${Date.now()}_${index}`; // Ensure unique ID for this push
+        const docId = `sync_${Date.now()}_${index}`;
         const docRef = userDocRef.collection('transactions').doc(docId);
-        
+
         batch.set(docRef, {
           amount: t.amount || 0,
           note: t.note || '',
@@ -118,7 +279,7 @@ class FirebaseSyncService {
   }
 
   /**
-   * Push a single transaction to Firestore with a specific prefix.
+   * Push một giao dịch đơn lên Firestore.
    */
   async pushSingleTransaction(uid: string, t: Transaction, prefix: 'legacy' | 'sync'): Promise<void> {
     try {
@@ -142,7 +303,6 @@ class FirebaseSyncService {
         deviceId: t.deviceId || '',
       }, { merge: true });
 
-      // Mark as synced locally
       await db.markAsSynced([t.id]);
       transactionEvents.emitChanged();
     } catch (error) {
@@ -152,11 +312,11 @@ class FirebaseSyncService {
   }
 
   /**
-   * Automatically push only unsynced transactions (is_synced = 0) and mark them as 1.
+   * Push tất cả giao dịch chưa sync (is_synced = 0).
    */
   async pushUnsyncedTransactions(uid: string): Promise<void> {
     if (this.isSyncing) return;
-    
+
     try {
       this.isSyncing = true;
       const unsyncedTransactions = await db.getUnsyncedTransactions();
@@ -164,12 +324,11 @@ class FirebaseSyncService {
 
       console.log(`Starting background sync for ${unsyncedTransactions.length} transactions...`);
 
-      // We process them sequentially or in small batches to avoid overwhelming the system
       for (const t of unsyncedTransactions) {
         await this.pushSingleTransaction(uid, t, 'sync');
       }
-      
-      console.log(`Successfully completed background sync.`);
+
+      console.log('Successfully completed background sync.');
     } catch (error) {
       console.error('FirebaseSyncService Error (pushUnsynced):', error);
     } finally {

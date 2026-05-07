@@ -21,7 +21,8 @@ import React, { useState, useEffect } from 'react';
 import './src/styles/global.css';
 import { View, ActivityIndicator, StyleSheet, StatusBar, Alert } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
-import { firebaseAuth } from './src/config/firebase';
+import { firebaseAuth, firestoreDb } from './src/config/firebase';
+import messaging from '@react-native-firebase/messaging';
 import AppNavigator from './src/navigation/AppNavigator';
 import { Colors } from './src/theme/colors';
 import NetInfo from '@react-native-community/netinfo';
@@ -173,11 +174,43 @@ export default function App() {
           await localDb.clearAllData();
           await firebaseAuth().signOut();
         });
+
+        // ── Khởi động real-time Firestore listener ──────────────────────────
+        // Lắng nghe document mới từ Telegram Bot hoặc thiết bị khác push lên.
+        // Khi có doc mới → tự động insert SQLite → emit event → UI refresh.
+        syncService.startRealtimeListener(user.uid);
+
+        // ── Đăng ký và lưu FCM token để server gửi silent push ─────────────
+        // Silent push sẽ kích hoạt pullTransactions() khi app bị kill.
+        try {
+          const authStatus = await messaging().requestPermission();
+          const enabled =
+            authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+            authStatus === messaging.AuthorizationStatus.PROVISIONAL;
+
+          if (enabled) {
+            const fcmToken = await messaging().getToken();
+            if (fcmToken) {
+              // Lưu token vào Firestore để server đọc khi cần push
+              await firestoreDb()
+                .collection('users')
+                .doc(user.uid)
+                .set({ fcmToken }, { merge: true });
+              console.log('[FCM] Token registered:', fcmToken.substring(0, 20) + '...');
+            }
+          }
+        } catch (fcmErr) {
+          // Không làm app crash nếu FCM lỗi
+          console.warn('[FCM] Token registration failed (non-critical):', fcmErr);
+        }
+
       } else {
         if (sessionUnsubscribe) {
           sessionUnsubscribe();
           sessionUnsubscribe = null;
         }
+        // ── Hủy Firestore listener khi đăng xuất ───────────────────────────
+        syncService.stopRealtimeListener();
       }
 
       if (isInitializing) setIsInitializing(false);

@@ -14,7 +14,7 @@ import requests
 from openpyxl.styles import Border, Font, Side
 from openpyxl.utils import get_column_letter
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, messaging
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -597,6 +597,59 @@ def _atomic_counter_and_write(transaction, counter_ref, tx_doc_ref, firestore_da
     return next_number
 
 
+def _send_fcm_notification(firebase_uid: str, doc_id: str, parsed: dict) -> None:
+    """
+    Gửi FCM silent data notification đến token của user (nếu có).
+    Đây là silent notification (data-only) — không hiện popup cho user.
+    App React Native sẽ nhận qua setBackgroundMessageHandler() và pull data.
+    
+    Nếu user chưa lưu FCM token thì bỏ qua, không gây lỗi.
+    Ló gời FCM được xử lý hẳn hoàn bên trong — không lan ra nước ngoài.
+    """
+    try:
+        # Lấy FCM token đã được lưu bởi app (trong Firestore user doc)
+        user_doc = db.collection("users").document(firebase_uid).get()
+        if not user_doc.exists:
+            return
+        
+        user_data = user_doc.to_dict() or {}
+        fcm_token = user_data.get("fcmToken") or user_data.get("fcm_token")
+        
+        if not fcm_token:
+            # User chưa lưu FCM token — bỏ qua, không được lỗi
+            print(f"[FCM] No token found for uid={firebase_uid}, skipping.")
+            return
+        
+        # Tạo silent data-only message (không hiện popup)
+        message = messaging.Message(
+            data={
+                "type": "TRANSACTION_ADDED",
+                "docId": str(doc_id),
+                "category": str(parsed.get("category", "")),
+                "amount": str(parsed.get("amount", 0)),
+            },
+            android=messaging.AndroidConfig(
+                priority="high",
+                # Không đặt notification — silent push — tự động xử lý trong background
+            ),
+            token=fcm_token,
+        )
+        
+        response = messaging.send(message)
+        print(f"[FCM] Silent notification sent to uid={firebase_uid}: {response}")
+        
+    except messaging.UnregisteredError:
+        # Token hết hạn — xóa token khỏi Firestore để không gửi nữa
+        print(f"[FCM] Token expired for uid={firebase_uid}, removing from Firestore.")
+        try:
+            db.collection("users").document(firebase_uid).update({"fcmToken": firestore.DELETE_FIELD})
+        except Exception:
+            pass
+    except Exception as e:
+        # Lỗi FCM không được làm sập flow chính
+        print(f"[FCM] Send error for uid={firebase_uid}: {e}")
+
+
 def _save_transaction_atomic(firebase_uid: str, firestore_data: dict) -> str:
     """
     Lưu transaction + tăng counter trong 1 Firestore Transaction duy nhất.
@@ -734,6 +787,13 @@ def process_ai_and_save(bot_token: str, firebase_uid: str, chat_id: int, text: s
 
         # 4. ATOMIC: counter + write trong 1 transaction duy nhất
         doc_id = _save_transaction_atomic(firebase_uid, firestore_data)
+
+        # 4b. Gửi FCM silent notification — kích hoạt sync khi app bị kill/background
+        # Không ảnh hưởng flow chính nếu FCM lỗi
+        try:
+            _send_fcm_notification(firebase_uid, doc_id, parsed)
+        except Exception as fcm_err:
+            print(f"[FCM] Non-critical error, ignoring: {fcm_err}")
 
         # 5. Telegram reply — NGOÀI transaction
         type_label = "Thu nhập" if parsed["type"] == 1 else "Chi tiêu"
