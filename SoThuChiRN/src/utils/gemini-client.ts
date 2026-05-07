@@ -6,7 +6,7 @@
  */
 
 const GEMINI_API_KEY = 'AIzaSyBk2tRqMVasNvZP13P9O5eymUiD-rSc31A';
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-latest:generateContent';
 
 export interface GeminiAIResponse {
   so_tien: number;           // Amount
