@@ -29,6 +29,8 @@ import NetInfo from '@react-native-community/netinfo';
 import OfflineStatusModal from './src/components/OfflineStatusModal';
 import { syncService } from './src/services/FirebaseSyncService';
 import { transactionEvents } from './src/services/TransactionEvents';
+import { notificationBridge } from './src/services/NotificationBridge';
+import { BACKEND_URL } from './src/config/api';
 import AIFloatingIsland from './src/components/AIFloatingIsland';
 import AIChatModal from './src/components/AIChatModal';
 import { db } from './src/database/DatabaseHelper';
@@ -203,6 +205,11 @@ export default function App() {
           // Không làm app crash nếu FCM lỗi
           console.warn('[FCM] Token registration failed (non-critical):', fcmErr);
         }
+
+        // ── Cấu hình Native Notification Listener (Chỉ Android) ────────────
+        await notificationBridge.setApiConfig(user.uid, BACKEND_URL);
+        // Có thể prompt user bật quyền nếu chưa bật (tuỳ chọn)
+        // await notificationBridge.promptToEnableIfRequired();
 
       } else {
         if (sessionUnsubscribe) {

@@ -74,6 +74,7 @@ Your ONLY job is to parse the user's Vietnamese text message and extract financi
    - "category": string. Must be EXACTLY one of the allowed categories listed below. Choose the most appropriate one based on context.
    - "note": string. A concise Vietnamese description of the transaction, summarizing what the user said. Maximum 50 characters.
    - "date": string. Format "dd/MM/yyyy". If the user specifies a date, use it. If they say "hôm nay" or "nay", use today's date. If they say "hôm qua", use yesterday. If no date is mentioned, use today's date. Today's date is: {current_date}.
+   - "source": string. The origin of the transaction. Extract from context or package name (e.g., "Momo", "ZaloPay", "Techcombank", "Vietcombank"). If it's a manual message and no specific bank/wallet is mentioned, output "Tiền mặt".
 
 ## ALLOWED EXPENSE CATEGORIES (type=0):
 "Ăn uống", "Chi tiêu", "Quần áo", "Mỹ phẩm", "Giao lưu", "Y tế", "Giáo dục", "Tiền điện", "Du lịch", "Liên lạc", "Tiền nhà", "Khác"
@@ -118,6 +119,12 @@ app = FastAPI(title="Firestore Export & Telegram Bot API")
 class ExportEmailRequest(BaseModel):
     userId: str = Field(..., min_length=1)
     userEmail: str = Field(..., min_length=1)
+
+class NotificationProcessRequest(BaseModel):
+    firebase_uid: str
+    title: str
+    text: str
+    package_name: str
 
 
 # ==========================================
@@ -599,12 +606,9 @@ def _atomic_counter_and_write(transaction, counter_ref, tx_doc_ref, firestore_da
 
 def _send_fcm_notification(firebase_uid: str, doc_id: str, parsed: dict) -> None:
     """
-    Gửi FCM silent data notification đến token của user (nếu có).
-    Đây là silent notification (data-only) — không hiện popup cho user.
-    App React Native sẽ nhận qua setBackgroundMessageHandler() và pull data.
-    
-    Nếu user chưa lưu FCM token thì bỏ qua, không gây lỗi.
-    Ló gời FCM được xử lý hẳn hoàn bên trong — không lan ra nước ngoài.
+    Gửi FCM notification đến token của user (nếu có).
+    Thông báo này SẼ HIỆN POPUP (visible push notification) cho user.
+    Chứa trạng thái thành công, Amount, Category, Note, và Timestamp.
     """
     try:
         # Lấy FCM token đã được lưu bởi app (trong Firestore user doc)
@@ -620,17 +624,33 @@ def _send_fcm_notification(firebase_uid: str, doc_id: str, parsed: dict) -> None
             print(f"[FCM] No token found for uid={firebase_uid}, skipping.")
             return
         
-        # Tạo silent data-only message (không hiện popup)
+        # Chuẩn bị nội dung hiển thị
+        cat = str(parsed.get("category", "Khác"))
+        amt = parsed.get("amount", 0)
+        amt_str = f"{amt:,}đ" if isinstance(amt, (int, float)) else f"{amt}đ"
+        note = parsed.get("note", "")
+        note_str = f"\nGhi chú: {note}" if note else ""
+        date_str = parsed.get("date", "")
+        date_display = f"\nLúc: {date_str}" if date_str else ""
+        source = parsed.get("source", "Tiền mặt")
+        source_display = f"\nNguồn: {source}"
+        
+        body_text = f"{cat}: {amt_str}{source_display}{note_str}{date_display}"
+
+        # Tạo message có `notification` để hiện popup
         message = messaging.Message(
+            notification=messaging.Notification(
+                title="✅ Ghi nhận thành công",
+                body=body_text
+            ),
             data={
                 "type": "TRANSACTION_ADDED",
                 "docId": str(doc_id),
-                "category": str(parsed.get("category", "")),
-                "amount": str(parsed.get("amount", 0)),
+                "category": cat,
+                "amount": str(amt),
             },
             android=messaging.AndroidConfig(
                 priority="high",
-                # Không đặt notification — silent push — tự động xử lý trong background
             ),
             token=fcm_token,
         )
@@ -650,10 +670,10 @@ def _send_fcm_notification(firebase_uid: str, doc_id: str, parsed: dict) -> None
         print(f"[FCM] Send error for uid={firebase_uid}: {e}")
 
 
-def _save_transaction_atomic(firebase_uid: str, firestore_data: dict) -> str:
+def _save_transaction_atomic(firebase_uid: str, firestore_data: dict, id_prefix: str = "reqtele") -> str:
     """
     Lưu transaction + tăng counter trong 1 Firestore Transaction duy nhất.
-    Trả về document ID (reqtele_N).
+    Trả về document ID (reqtele_N hoặc at_N).
     Không có network call nào khác bên trong → không bị triplication khi retry.
     """
     counter_ref = (
@@ -672,13 +692,13 @@ def _save_transaction_atomic(firebase_uid: str, firestore_data: dict) -> str:
         db.collection("users")
         .document(firebase_uid)
         .collection("transactions")
-        .document(f"reqtele_{predicted_next}")
+        .document(f"{id_prefix}_{predicted_next}")
     )
 
     transaction = db.transaction()
     actual_number = _atomic_counter_and_write(transaction, counter_ref, tx_doc_ref, firestore_data)
 
-    doc_id = f"reqtele_{actual_number}"
+    doc_id = f"{id_prefix}_{actual_number}"
     print(f"[Firestore] Saved {doc_id} to users/{firebase_uid}/transactions")
     return doc_id
 
@@ -729,6 +749,7 @@ def _build_firestore_payload(parsed: dict, firebase_uid: str) -> dict:
         "createdBy": str(firebase_uid),
         "deviceName": "Telegram Bot",
         "deviceId": "telegram_bot",
+        "source": str(parsed.get("source", "Tiền mặt")),
         "isDeleted": False,
         "is_synced": 1,
         "syncStatus": 1
@@ -764,7 +785,7 @@ def _handle_help_command(bot_token: str, chat_id: int):
     )
 
 
-def process_ai_and_save(bot_token: str, firebase_uid: str, chat_id: int, text: str):
+def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Optional[int], text: str, is_auto_detect: bool = False):
     """
     Background Task — KHÔNG có network call nào trong Firestore Transaction.
     Flow: AI parse (network) → Atomic Firestore write → Telegram reply (network).
@@ -777,7 +798,8 @@ def process_ai_and_save(bot_token: str, firebase_uid: str, chat_id: int, text: s
         
         if parsed == "ERROR_TIMEOUT":
             overload_msg = "❌ Xin lỗi bạn, hệ thống AI của Google hiện đang quá tải. Bạn vui lòng thử lại sau ít phút nhé!"
-            send_telegram_message(bot_token, chat_id, overload_msg)
+            if bot_token and chat_id:
+                send_telegram_message(bot_token, chat_id, overload_msg)
             return
 
         print(f"[AI Result] {parsed}")
@@ -786,7 +808,8 @@ def process_ai_and_save(bot_token: str, firebase_uid: str, chat_id: int, text: s
         firestore_data = _build_firestore_payload(parsed, firebase_uid)
 
         # 4. ATOMIC: counter + write trong 1 transaction duy nhất
-        doc_id = _save_transaction_atomic(firebase_uid, firestore_data)
+        id_prefix = "at" if is_auto_detect else "reqtele"
+        doc_id = _save_transaction_atomic(firebase_uid, firestore_data, id_prefix)
 
         # 4b. Gửi FCM silent notification — kích hoạt sync khi app bị kill/background
         # Không ảnh hưởng flow chính nếu FCM lỗi
@@ -795,33 +818,39 @@ def process_ai_and_save(bot_token: str, firebase_uid: str, chat_id: int, text: s
         except Exception as fcm_err:
             print(f"[FCM] Non-critical error, ignoring: {fcm_err}")
 
-        # 5. Telegram reply — NGOÀI transaction
-        type_label = "Thu nhập" if parsed["type"] == 1 else "Chi tiêu"
-        amt = f"{parsed['amount']:,}đ"
-        cat_emoji = CATEGORY_EMOJIS.get(parsed["category"], "")
-        msg = (
-            f"✅Đã ghi nhận thành công!\n\n"
-            f"Loại: {type_label}\n"
-            f"Số tiền: {amt}\n"
-            f"{cat_emoji} Danh mục: {parsed['category']}\n"
-            f"Ghi chú: {parsed['note']}\n"
-            f"Ngày: {parsed['date']}\n"
-            f"ID: {doc_id}"
-        )
-        send_telegram_message(bot_token, chat_id, msg)
+        # 5. Telegram reply — NGOÀI transaction (chỉ gửi nếu đến từ Telegram)
+        if bot_token and chat_id:
+            type_label = "Thu nhập" if parsed["type"] == 1 else "Chi tiêu"
+            amt = f"{parsed['amount']:,}đ"
+            cat_emoji = CATEGORY_EMOJIS.get(parsed["category"], "")
+            source = parsed.get("source", "Tiền mặt")
+            msg = (
+                f"✅Đã ghi nhận thành công!\n\n"
+                f"Loại: {type_label}\n"
+                f"Số tiền: {amt}\n"
+                f"Nguồn: {source}\n"
+                f"{cat_emoji} Danh mục: {parsed['category']}\n"
+                f"Ghi chú: {parsed['note']}\n"
+                f"Ngày: {parsed['date']}\n"
+                f"ID: {doc_id}"
+            )
+            send_telegram_message(bot_token, chat_id, msg)
 
     except json.JSONDecodeError as e:
         print(f"[AI Parse Error] {e}")
         traceback.print_exc()
-        send_telegram_message(bot_token, chat_id, "Khong the hieu noi dung. Vi du: An trua 50k")
+        if bot_token and chat_id:
+            send_telegram_message(bot_token, chat_id, "Khong the hieu noi dung. Vi du: An trua 50k")
     except requests.exceptions.RequestException as e:
         print(f"[AI API Error] {e}")
         traceback.print_exc()
-        send_telegram_message(bot_token, chat_id, "Loi ket noi AI. Vui long thu lai sau.")
+        if bot_token and chat_id:
+            send_telegram_message(bot_token, chat_id, "Loi ket noi AI. Vui long thu lai sau.")
     except Exception as e:
         print(f"[Error] process_ai_and_save: {e}")
         traceback.print_exc()
-        send_telegram_message(bot_token, chat_id, f"Da co loi xay ra: {str(e)[:150]}")
+        if bot_token and chat_id:
+            send_telegram_message(bot_token, chat_id, f"Da co loi xay ra: {str(e)[:150]}")
 
 
 @app.post("/webhook/telegram/{bot_token}")
@@ -858,6 +887,22 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
             background_tasks.add_task(process_ai_and_save, bot_token, firebase_uid, chat_id, text)
 
     return {"status": "ok"}
+
+
+@app.post("/api/notification/process")
+async def process_notification(req: NotificationProcessRequest, background_tasks: BackgroundTasks):
+    """
+    Endpoint nhận raw text từ Android NotificationListenerService.
+    Chỉ dùng background_tasks để gọi process_ai_and_save (cùng logic với Telegram),
+    nhưng không cần Telegram bot_token hay chat_id (truyền None).
+    """
+    # Gộp title và text để AI dễ phân tích
+    combined_text = f"Thông báo từ ứng dụng {req.package_name}: {req.title} - {req.text}"
+    
+    # process_ai_and_save xử lý phân tích và lưu, nếu thành công sẽ gửi FCM push notification
+    background_tasks.add_task(process_ai_and_save, None, req.firebase_uid, None, combined_text, True)
+    
+    return {"status": "processing"}
 
 
 if __name__ == "__main__":

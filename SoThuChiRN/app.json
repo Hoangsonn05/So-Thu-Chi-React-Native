@@ -22,6 +22,14 @@
     },
     "plugins": [
       "@react-native-firebase/app",
+      [
+        "@react-native-firebase/messaging",
+        {
+          "UIBackgroundModes": [
+            "remote-notification"
+          ]
+        }
+      ],
       "expo-sqlite",
       "expo-asset"
     ]
