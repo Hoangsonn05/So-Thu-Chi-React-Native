@@ -113,6 +113,7 @@ class FirebaseSyncService {
           }
 
           const newTransaction: Transaction = {
+            doc_id: docId,
             amount: Number(data.amount) || 0,
             note: String(data.note || ''),
             category: String(data.category || 'Khác'),
@@ -141,10 +142,10 @@ class FirebaseSyncService {
           }
         }
 
-        // Chỉ emit event nếu thực sự có dữ liệu mới được insert
+        // Chỉ emit event nếu thực sự có dữ liệu mới được insert (Batch refresh)
         if (hasNewData) {
           transactionEvents.emitChanged();
-          console.log('[FirebaseSync] 🔔 UI refresh triggered.');
+          console.log(`[FirebaseSync] 🔔 UI refresh triggered for ${addedChanges.length} items.`);
         }
       },
       (error) => {
@@ -213,6 +214,7 @@ class FirebaseSyncService {
         }
 
         cloudTransactions.push({
+          doc_id: doc.id,
           amount: data.amount || 0,
           note: data.note || '',
           category: data.category || '',
@@ -304,8 +306,9 @@ class FirebaseSyncService {
         deviceId: t.deviceId || '',
       }, { merge: true });
 
-      await db.markAsSynced([t.id]);
-      transactionEvents.emitChanged();
+      // Cập nhật doc_id ngược lại SQLite để chống trùng lặp khi onSnapshot fires
+      await db.updateDocId(t.id, docId);
+      console.log(`[FirebaseSync] Pushed & Updated local doc_id: ${docId}`);
     } catch (error) {
       console.error(`FirebaseSyncService Error (pushSingle - ${prefix}):`, error);
       throw error;
@@ -329,7 +332,9 @@ class FirebaseSyncService {
         await this.pushSingleTransaction(uid, t, 'sync');
       }
 
-      console.log('Successfully completed background sync.');
+      // Chỉ thông báo UI một lần duy nhất sau khi hoàn tất batch sync
+      transactionEvents.emitChanged();
+      console.log('Successfully completed background sync batch.');
     } catch (error) {
       console.error('FirebaseSyncService Error (pushUnsynced):', error);
     } finally {

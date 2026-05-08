@@ -118,12 +118,12 @@ db = firestore.client()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    from agentic_ai import generate_weekly_summary_job
+    from agentic_ai import poll_scheduled_tasks_job
     scheduler = AsyncIOScheduler()
-    # Chạy vào 20:00 tối Chủ Nhật hàng tuần
-    scheduler.add_job(generate_weekly_summary_job, 'cron', day_of_week='sun', hour=20, minute=0)
+    # Chạy polling mỗi 1 phút
+    scheduler.add_job(poll_scheduled_tasks_job, 'interval', minutes=1)
     scheduler.start()
-    print("[Scheduler] Đã khởi động Cron Job hàng tuần (Chủ nhật 20:00).")
+    print("[Scheduler] Đã khởi động Polling Job mỗi phút.")
     yield
     scheduler.shutdown()
 

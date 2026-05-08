@@ -15,6 +15,7 @@
 
 export interface Transaction {
   id?: number;
+  doc_id?: string;
   amount: number;
   note: string;
   category: string;

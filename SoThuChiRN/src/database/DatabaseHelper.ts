@@ -22,6 +22,7 @@ const TABLE_USERS = 'users';
 
 // Transaction columns
 const COLUMN_ID = 'id';
+const COLUMN_DOC_ID = 'doc_id';
 const COLUMN_AMOUNT = 'amount';
 const COLUMN_NOTE = 'note';
 const COLUMN_CATEGORY = 'category';
@@ -59,6 +60,7 @@ class DatabaseHelper {
       await this.db.execAsync(`
       CREATE TABLE IF NOT EXISTS ${TABLE_TRANSACTIONS} (
         ${COLUMN_ID} INTEGER PRIMARY KEY AUTOINCREMENT,
+        ${COLUMN_DOC_ID} TEXT UNIQUE,
         ${COLUMN_AMOUNT} INTEGER,
         ${COLUMN_NOTE} TEXT,
         ${COLUMN_CATEGORY} TEXT,
@@ -81,6 +83,21 @@ class DatabaseHelper {
         ${COLUMN_U_PHOTO} TEXT
       );
     `);
+
+      // Migration: Add COLUMN_DOC_ID if missing
+      try {
+        const tableInfo = await this.db.getAllAsync<any>(`PRAGMA table_info(${TABLE_TRANSACTIONS})`);
+        const hasDocIdColumn = tableInfo.some((col: any) =>
+          col.name && col.name.toLowerCase() === COLUMN_DOC_ID.toLowerCase()
+        );
+        if (!hasDocIdColumn) {
+          await this.db.execAsync(`ALTER TABLE ${TABLE_TRANSACTIONS} ADD COLUMN ${COLUMN_DOC_ID} TEXT`);
+          await this.db.execAsync(`CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_doc_id ON ${TABLE_TRANSACTIONS}(${COLUMN_DOC_ID})`);
+          console.log('Migration: Added doc_id column to transactions table and created unique index.');
+        }
+      } catch (e: any) {
+        console.error('Migration error for doc_id:', e);
+      }
 
       // Migration: Add COLUMN_SEARCH_CONTENT and COLUMN_IS_SYNCED if missing
       try {
@@ -158,6 +175,7 @@ class DatabaseHelper {
   private mapRowToTransaction(row: any): Transaction {
     return {
       id: row.id,
+      doc_id: row.doc_id,
       amount: row.amount,
       note: row.note,
       category: row.category,
@@ -180,8 +198,8 @@ class DatabaseHelper {
     const isSynced = t.is_synced !== undefined ? t.is_synced : 0;
     
     const result = await db.runAsync(
-      `INSERT INTO ${TABLE_TRANSACTIONS} (${COLUMN_AMOUNT}, ${COLUMN_NOTE}, ${COLUMN_CATEGORY}, ${COLUMN_DATE}, ${COLUMN_TYPE}, ${COLUMN_CREATED_BY}, ${COLUMN_DEVICE_NAME}, ${COLUMN_DEVICE_ID}, ${COLUMN_SEARCH_CONTENT}, ${COLUMN_IS_SYNCED}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [t.amount, t.note, t.category, t.date, t.type, t.createdBy ?? '', t.deviceName ?? '', t.deviceId ?? '', searchContent, isSynced]
+      `INSERT OR REPLACE INTO ${TABLE_TRANSACTIONS} (${COLUMN_DOC_ID}, ${COLUMN_AMOUNT}, ${COLUMN_NOTE}, ${COLUMN_CATEGORY}, ${COLUMN_DATE}, ${COLUMN_TYPE}, ${COLUMN_CREATED_BY}, ${COLUMN_DEVICE_NAME}, ${COLUMN_DEVICE_ID}, ${COLUMN_SEARCH_CONTENT}, ${COLUMN_IS_SYNCED}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [t.doc_id ?? null, t.amount, t.note, t.category, t.date, t.type, t.createdBy ?? '', t.deviceName ?? '', t.deviceId ?? '', searchContent, isSynced]
     );
     return result.lastInsertRowId;
   }
@@ -398,8 +416,8 @@ class DatabaseHelper {
         const searchContent = ` ${normalizeForSearch(`${t.note} ${t.category}`)} `;
         // data pulled from cloud is considered fully synced (1)
         await db.runAsync(
-          `INSERT INTO ${TABLE_TRANSACTIONS} (${COLUMN_AMOUNT}, ${COLUMN_NOTE}, ${COLUMN_CATEGORY}, ${COLUMN_DATE}, ${COLUMN_TYPE}, ${COLUMN_CREATED_BY}, ${COLUMN_DEVICE_NAME}, ${COLUMN_DEVICE_ID}, ${COLUMN_SEARCH_CONTENT}, ${COLUMN_IS_SYNCED}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [t.amount, t.note, t.category, t.date, t.type, t.createdBy ?? '', t.deviceName ?? '', t.deviceId ?? '', searchContent, 1]
+          `INSERT OR REPLACE INTO ${TABLE_TRANSACTIONS} (${COLUMN_DOC_ID}, ${COLUMN_AMOUNT}, ${COLUMN_NOTE}, ${COLUMN_CATEGORY}, ${COLUMN_DATE}, ${COLUMN_TYPE}, ${COLUMN_CREATED_BY}, ${COLUMN_DEVICE_NAME}, ${COLUMN_DEVICE_ID}, ${COLUMN_SEARCH_CONTENT}, ${COLUMN_IS_SYNCED}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [t.doc_id ?? null, t.amount, t.note, t.category, t.date, t.type, t.createdBy ?? '', t.deviceName ?? '', t.deviceId ?? '', searchContent, 1]
         );
       }
     });
@@ -473,6 +491,18 @@ class DatabaseHelper {
     await db.runAsync(
       `UPDATE ${TABLE_TRANSACTIONS} SET ${COLUMN_IS_SYNCED} = 1 WHERE ${COLUMN_ID} IN (${placeholders})`,
       ids
+    );
+  }
+
+  /**
+   * Cập nhật doc_id cho một giao dịch sau khi đẩy lên Firestore thành công.
+   * Đây là bước then chốt để chống trùng lặp dữ liệu (Upsert dựa trên doc_id).
+   */
+  async updateDocId(id: number, docId: string): Promise<void> {
+    const db = await this.open();
+    await db.runAsync(
+      `UPDATE ${TABLE_TRANSACTIONS} SET ${COLUMN_DOC_ID} = ?, ${COLUMN_IS_SYNCED} = 1 WHERE ${COLUMN_ID} = ?`,
+      [docId, id]
     );
   }
 }

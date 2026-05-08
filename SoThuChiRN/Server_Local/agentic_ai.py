@@ -20,17 +20,45 @@ VN_TZ = timezone(timedelta(hours=7))
 
 # Prompt cho công việc tổng hợp/truy vấn của Agent
 AGENTIC_SYSTEM_PROMPT = """Bạn là "Giám đốc tài chính" AI chủ động của ứng dụng cá nhân Sổ Thu Chi.
-Nhiệm vụ của bạn là giải đáp các thắc mắc về tình hình tài chính của người dùng dựa trên dữ liệu thật.
+Nhiệm vụ của bạn là giải đáp các thắc mắc về tình hình tài chính của người dùng dựa trên dữ liệu thật, cũng như lên lịch báo cáo tự động theo yêu cầu.
 
 Bạn BẮT BUỘC phải dùng công cụ `query_database` khi người dùng hỏi về:
 - Tổng chi tiêu, thu nhập (ví dụ: "Tháng này tiêu bao nhiêu?", "Báo cáo tuần qua", "Hôm nay tôi tiêu gì?").
 - Số tiền chi cho một danh mục cụ thể (ví dụ: "Tiêu bao nhiêu tiền ăn uống rồi?", "Tiền điện tháng này").
 
+Bạn BẮT BUỘC phải dùng công cụ `schedule_report` khi người dùng yêu cầu đặt lịch báo cáo trong tương lai:
+- Ví dụ: "Lên lịch báo cáo lúc 16:20 hôm nay", "Nhắc tôi xem báo cáo vào 8h sáng mai".
+- Định dạng thời gian cho công cụ này là chuẩn ISO 8601 (ví dụ: 2026-05-08T16:20:00). Bạn tự tính toán datetime phù hợp theo múi giờ Việt Nam (UTC+7).
+
 QUY TẮC:
 1. KHÔNG tự bịa ra con số. Luôn gọi `query_database`.
 2. Khi nhận được kết quả từ công cụ, hãy tổng hợp lại thành một đoạn văn ngắn gọn, chuyên nghiệp, lịch sự bằng tiếng Việt để báo cáo cho người dùng.
-3. Nếu người dùng hỏi các câu chung chung không liên quan đến dữ liệu (ví dụ: "Chào bạn", "Bạn có thể làm gì"), hãy giới thiệu bạn là Giám đốc tài chính AI có thể giúp họ theo dõi thu chi và xuất báo cáo.
+3. Nếu gọi `schedule_report`, hãy xác nhận với người dùng rằng lịch đã được lưu thành công.
 """
+
+def execute_schedule_report(firebase_uid: str, target_datetime_iso: str, report_type: str) -> str:
+    """ Lưu lịch báo cáo vào Firestore collection 'scheduled_tasks'. """
+    db = firestore.client()
+    try:
+        # Nhận ISO string, chuyển thành datetime object chuẩn (đã có múi giờ hoặc gán UTC+7)
+        dt = datetime.fromisoformat(target_datetime_iso.replace('Z', '+00:00'))
+        # Đảm bảo lưu đúng định dạng để sau này query dễ dàng
+        target_utc = dt.astimezone(timezone.utc)
+        
+        task_data = {
+            "uid": firebase_uid,
+            "target_datetime": target_utc,
+            "report_type": report_type,
+            "status": "pending",
+            "created_at": firestore.SERVER_TIMESTAMP
+        }
+        
+        db.collection("scheduled_tasks").add(task_data)
+        return json.dumps({"status": "success", "message": f"Đã lên lịch thành công cho thời gian {dt.strftime('%d/%m/%Y %H:%M')}"}, ensure_ascii=False)
+        
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({"status": "error", "error": str(e)})
 
 def execute_query_database(firebase_uid: str, category: str, timeframe: str) -> str:
     """
@@ -136,6 +164,21 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                     "required": ["category", "timeframe"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "schedule_report",
+                "description": "Lên lịch gửi báo cáo tài chính vào một thời điểm trong tương lai.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_datetime": { "type": "string", "description": "Thời gian gửi báo cáo (định dạng ISO 8601, ví dụ: '2026-05-08T16:20:00+07:00')" },
+                        "report_type": { "type": "string", "description": "Loại báo cáo cần gửi (ví dụ: 'weekly_summary', 'daily_summary')" }
+                    },
+                    "required": ["target_datetime", "report_type"]
+                }
+            }
         }
     ]
 
@@ -178,6 +221,14 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                     category=arguments.get("category", "Tất cả"),
                     timeframe=arguments.get("timeframe", "current_month")
                 )
+            elif function_name == "schedule_report":
+                db_result = execute_schedule_report(
+                    firebase_uid=firebase_uid,
+                    target_datetime_iso=arguments.get("target_datetime"),
+                    report_type=arguments.get("report_type", "summary")
+                )
+            else:
+                db_result = json.dumps({"error": "Unknown function"})
                 
                 # Cập nhật danh sách message với tool response
                 messages.append(message) 
@@ -241,40 +292,55 @@ def send_tg_msg(bot_token: str, chat_id: int, text: str):
     except Exception as e:
         print(f"[CronJob] Lỗi gửi Telegram: {e}")
 
-def generate_weekly_summary_job():
-    """ Tác vụ Cron Job: lặp qua các user, phân tích và gửi báo cáo tuần. """
-    print(f"[Cron Job] Chạy tổng hợp báo cáo tuần: {datetime.now(tz=VN_TZ)}")
+# -------------- POLLING JOB HÀNG PHÚT --------------
+
+def poll_scheduled_tasks_job():
+    """ Quét Firestore mỗi phút để tìm và thực thi các báo cáo đến hạn. """
+    print(f"[Polling Job] Quét các tác vụ đến hạn: {datetime.now(tz=VN_TZ).strftime('%H:%M:%S')}")
     db = firestore.client()
     try:
-        users = db.collection("users").stream()
-        for user_doc in users:
-            uid = user_doc.id
-            user_data = user_doc.to_dict()
+        now_utc = datetime.now(timezone.utc)
+        
+        # Lấy các task pending và đã đến/qua hạn
+        tasks_query = db.collection("scheduled_tasks").where("status", "==", "pending").where("target_datetime", "<=", now_utc)
+        docs = tasks_query.stream()
+        
+        for doc in docs:
+            task_data = doc.to_dict()
+            uid = task_data.get("uid")
             
+            print(f"[Polling Job] Đang thực thi task {doc.id} cho user {uid}")
+            
+            # Cập nhật status thành completed (để không chạy lại)
+            doc.reference.update({"status": "completed"})
+            
+            # Lấy thông tin user để gửi báo cáo
+            user_doc = db.collection("users").document(uid).get()
+            if not user_doc.exists:
+                continue
+                
+            user_data = user_doc.to_dict()
             tg_config = user_data.get("telegramConfig")
             bot_token = tg_config.get("botToken") if tg_config else None
             chat_id = tg_config.get("chatId") if tg_config else None
-            
             fcm_token = user_data.get("fcmToken") or user_data.get("fcm_token")
             
-            # Chỉ xử lý nếu user có liên kết Telegram HOẶC có FCM token
             if (bot_token and chat_id) or fcm_token:
-                # Gọi thẳng hàm AI với lời nhắc tổng kết tuần
+                # Dùng AI để tạo báo cáo
                 report_query = "Hãy lập một báo cáo tài chính ngắn gọn nhưng đầy đủ cho tôi trong 7 ngày qua (last_week). Liệt kê tổng thu, tổng chi và những khoản chi tiêu lớn nhất."
                 report_content = chat_with_agentic_ai(report_query, uid)
                 
                 if report_content:
-                    title = "📊 Báo cáo Tài chính Tuần qua"
+                    title = "📊 Báo cáo Tài chính Đã Lên Lịch"
                     
                     if bot_token and chat_id:
                         send_tg_msg(bot_token, chat_id, f"*{title}*\n\n{report_content}")
                     
                     if fcm_token:
-                        # FCM body có giới hạn, lấy 100-150 ký tự đầu tiên cho đẹp
                         short_body = report_content[:150] + ("..." if len(report_content) > 150 else "")
                         send_fcm_push(uid, title, short_body)
                         
     except Exception as e:
-        print(f"[Cron Job Error] {e}")
+        print(f"[Polling Job Error] {e}")
         traceback.print_exc()
 
