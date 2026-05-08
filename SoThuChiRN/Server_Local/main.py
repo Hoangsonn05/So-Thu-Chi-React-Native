@@ -852,6 +852,15 @@ def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Op
         except Exception as fcm_err:
             print(f"[FCM] Non-critical error, ignoring: {fcm_err}")
 
+        # 4c. KIỂM TRA NGÂN SÁCH (Phase 3 - Dynamic Budgeting)
+        # Chỉ kiểm tra cho các khoản CHI TIÊU (type == 0)
+        if parsed.get("type") == 0:
+            try:
+                from agentic_ai import check_budget_thresholds
+                check_budget_thresholds(firebase_uid, parsed.get("category", "Khác"), float(parsed.get("amount", 0)))
+            except Exception as budget_err:
+                print(f"[Budget Check] Non-critical error, ignoring: {budget_err}")
+
         # 5. Telegram reply — NGOÀI transaction (chỉ gửi nếu đến từ Telegram)
         if bot_token and chat_id:
             type_label = "Thu nhập" if parsed["type"] == 1 else "Chi tiêu"

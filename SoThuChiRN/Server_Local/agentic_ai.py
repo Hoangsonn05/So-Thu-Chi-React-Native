@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import traceback
+import calendar
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from google.api_core.exceptions import FailedPrecondition
@@ -21,7 +22,7 @@ VN_TZ = timezone(timedelta(hours=7))
 
 # Prompt cho công việc tổng hợp/truy vấn của Agent
 AGENTIC_SYSTEM_PROMPT = """Bạn là "Giám đốc tài chính" AI chủ động của ứng dụng cá nhân Sổ Thu Chi.
-Nhiệm vụ của bạn là giải đáp các thắc mắc về tình hình tài chính của người dùng dựa trên dữ liệu thật, cũng như lên lịch báo cáo tự động theo yêu cầu.
+Nhiệm vụ của bạn là giải đáp các thắc mắc về tình hình tài chính của người dùng dựa trên dữ liệu thật, cũng như lên lịch báo cáo và thiết lập cảnh báo ngân sách theo yêu cầu.
 
 Bạn BẮT BUỘC phải dùng công cụ `query_database` khi người dùng hỏi về:
 - Tổng chi tiêu, thu nhập (ví dụ: "Tháng này tiêu bao nhiêu?", "Báo cáo tuần qua", "Hôm nay tôi tiêu gì?").
@@ -31,11 +32,40 @@ Bạn BẮT BUỘC phải dùng công cụ `schedule_report` khi người dùng 
 - Ví dụ: "Lên lịch báo cáo lúc 16:20 hôm nay", "Nhắc tôi xem báo cáo vào 8h sáng mai".
 - Định dạng thời gian cho công cụ này là chuẩn ISO 8601 (ví dụ: 2026-05-08T16:20:00). Bạn tự tính toán datetime phù hợp theo múi giờ Việt Nam (UTC+7).
 
+Bạn BẮT BUỘC phải dùng công cụ `set_budget_alert` khi người dùng muốn thiết lập hạn mức/ngân sách chi tiêu:
+- Ví dụ: "Đặt ngân sách ăn uống tháng này là 5 triệu", "Cảnh báo tôi khi tiêu quá 80% ngân sách tổng".
+- Nếu người dùng không nói rõ danh mục, mặc định là 'Tất cả'. Nếu không nói rõ phần trăm cảnh báo, mặc định là 80%.
+
 QUY TẮC:
 1. KHÔNG tự bịa ra con số. Luôn gọi `query_database`.
 2. Khi nhận được kết quả từ công cụ, hãy tổng hợp lại thành một đoạn văn ngắn gọn, chuyên nghiệp, lịch sự bằng tiếng Việt để báo cáo cho người dùng.
-3. Nếu gọi `schedule_report`, hãy xác nhận với người dùng rằng lịch đã được lưu thành công.
+3. Nếu gọi `schedule_report` hoặc `set_budget_alert`, hãy xác nhận với người dùng rằng thông tin đã được lưu thành công.
 """
+
+def execute_set_budget_alert(firebase_uid: str, category: str, budget_amount: float, threshold_pct: float) -> str:
+    """ Lưu cấu hình ngân sách vào Firestore. """
+    db = firestore.client()
+    try:
+        # Normalize category name
+        cat_key = category if category else "Tất cả"
+        
+        budget_data = {
+            "category": cat_key,
+            "budget_amount": float(budget_amount),
+            "alert_threshold_percentage": float(threshold_pct),
+            "updated_at": firestore.SERVER_TIMESTAMP
+        }
+        
+        # Lưu vào collection chuyên biệt cho ngân sách
+        db.collection("user_budgets").document(firebase_uid).collection("budgets").document(cat_key).set(budget_data, merge=True)
+        
+        return json.dumps({
+            "status": "success", 
+            "message": f"Đã thiết lập ngân sách cho '{cat_key}' là {budget_amount:,.0f}đ. Tôi sẽ cảnh báo khi bạn tiêu quá {threshold_pct}%."
+        }, ensure_ascii=False)
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({"status": "error", "error": str(e)})
 
 def execute_schedule_report(firebase_uid: str, target_datetime_iso: str, report_type: str) -> str:
     """ Lưu lịch báo cáo vào Firestore collection 'scheduled_tasks'. """
@@ -185,6 +215,22 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                     "required": ["target_datetime", "report_type"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_budget_alert",
+                "description": "Thiết lập hạn mức chi tiêu (ngân sách) cho một danh mục và đặt ngưỡng cảnh báo.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": { "type": "string", "description": "Danh mục cần đặt ngân sách (ví dụ: 'Ăn uống', 'Tất cả')" },
+                        "budget_amount": { "type": "number", "description": "Số tiền hạn mức (ví dụ: 5000000)" },
+                        "threshold_pct": { "type": "number", "description": "Phần trăm ngưỡng cảnh báo (ví dụ: 80)" }
+                    },
+                    "required": ["category", "budget_amount", "threshold_pct"]
+                }
+            }
         }
     ]
 
@@ -232,6 +278,13 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                     firebase_uid=firebase_uid,
                     target_datetime_iso=arguments.get("target_datetime"),
                     report_type=arguments.get("report_type", "summary")
+                )
+            elif function_name == "set_budget_alert":
+                db_result = execute_set_budget_alert(
+                    firebase_uid=firebase_uid,
+                    category=arguments.get("category", "Tất cả"),
+                    budget_amount=arguments.get("budget_amount", 0),
+                    threshold_pct=arguments.get("threshold_pct", 80)
                 )
             else:
                 db_result = json.dumps({"error": "Unknown function"})
@@ -354,5 +407,140 @@ def poll_scheduled_tasks_job():
         print(f"[Polling Job Error] Firestore Error: Index missing or is currently building. Bỏ qua lần quét này. Chi tiết: {fpe}")
     except Exception as e:
         print(f"[Polling Job Error] {e}")
+        traceback.print_exc()
+
+# -------------- DYNAMIC BUDGETING & PROACTIVE ALERTS --------------
+
+def generate_ai_budget_warning(firebase_uid: str, data: dict):
+    """ Gọi AI để tạo lời cảnh báo cá nhân hóa khi vượt ngưỡng ngân sách. """
+    print(f"[Budget Alert] Đang gọi AI tạo cảnh báo cho {firebase_uid} - {data['category']}")
+    
+    prompt = f"""Bạn là Giám đốc tài chính AI. Hãy đưa ra một lời cảnh báo NGẮN GỌN (dưới 50 từ), 
+    thân thiện nhưng nghiêm túc về việc chi tiêu cho danh mục '{data['category']}'.
+    
+    Thông số hiện tại:
+    - Hạn mức tháng: {data['budget_amount']:,.0f}đ
+    - Đã tiêu: {data['current_spent']:,.0f}đ ({data['percent_used']:.1f}% hạn mức)
+    - Dự báo cuối tháng sẽ tiêu: {data['projected_spent']:,.0f}đ
+    
+    Hãy đưa ra một lời khuyên thực tế để người dùng cân đối lại chi tiêu."""
+
+    try:
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "HTTP-Referer": "https://github.com/Hoangsonn05/So-Thu-Chi-React-Native",
+            "X-Title": "So Thu Chi Budget Alert"
+        }
+        
+        response = requests.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        ai_msg = response.json()['choices'][0]['message']['content'].strip()
+        
+        # Gửi qua Telegram và FCM
+        db = firestore.client()
+        user_doc = db.collection("users").document(firebase_uid).get()
+        if user_doc.exists:
+            u_data = user_doc.to_dict()
+            tg = u_data.get("telegramConfig")
+            if tg and tg.get("chatId") and tg.get("botToken"):
+                send_tg_msg(tg["botToken"], tg["chatId"], f"⚠️ *CẢNH BÁO NGÂN SÁCH*\n\n{ai_msg}")
+            
+            fcm_token = u_data.get("fcmToken") or u_data.get("fcm_token")
+            if fcm_token:
+                send_fcm_push(firebase_uid, "⚠️ Cảnh báo chi tiêu", ai_msg)
+                
+    except Exception as e:
+        print(f"[Budget Alert Error] AI Warning failed: {e}")
+
+def check_budget_thresholds(firebase_uid: str, category: str, new_amount: float):
+    """ 
+    Logic Gating: Kiểm tra toán học trước khi quyết định gọi AI.
+    Hàm này được gọi mỗi khi có giao dịch chi tiêu mới.
+    """
+    db = firestore.client()
+    try:
+        # 1. Lấy cấu hình ngân sách (kiểm tra category cụ thể và 'Tất cả')
+        budgets_ref = db.collection("user_budgets").document(firebase_uid).collection("budgets")
+        budget_docs = budgets_ref.stream()
+        
+        # Danh sách các cấu hình ngân sách liên quan
+        relevant_budgets = []
+        for b in budget_docs:
+            b_data = b.to_dict()
+            b_cat = b_data.get("category", "Tất cả")
+            if b_cat == "Tất cả" or b_cat.lower() == category.lower():
+                relevant_budgets.append(b_data)
+        
+        if not relevant_budgets:
+            return
+
+        # 2. Tính toán chi tiêu trong tháng hiện tại
+        now = datetime.now(tz=VN_TZ)
+        start_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        # Số ngày trong tháng
+        _, days_in_month = calendar.monthrange(now.year, now.month)
+        current_day = now.day
+        
+        start_utc = start_month.astimezone(timezone.utc)
+        
+        # Query Firestore để tính tổng chi tiêu tháng này
+        # (Lưu ý: Yêu cầu index trên category + timestamp + createdBy nếu filter category)
+        for budget in relevant_budgets:
+            target_cat = budget["category"]
+            
+            query = db.collection("users").document(firebase_uid).collection("transactions")
+            query = query.where("type", "==", 0).where("isDeleted", "==", False).where("timestamp", ">=", start_utc)
+            
+            if target_cat != "Tất cả":
+                query = query.where("category", "==", target_cat)
+            
+            docs = query.stream()
+            total_spent = 0
+            for doc in docs:
+                total_spent += doc.to_dict().get("amount", 0)
+            
+            # 3. Tính toán Gating & Projection
+            budget_amount = budget["budget_amount"]
+            threshold_pct = budget.get("alert_threshold_percentage", 80)
+            percent_used = (total_spent / budget_amount) * 100
+            
+            # Dự báo: (số tiền tiêu / số ngày qua) * tổng số ngày trong tháng
+            projected_spent = (total_spent / current_day) * days_in_month
+            
+            # 4. Kiểm tra điều kiện gọi AI
+            # Điều kiện: Tiêu quá ngưỡng % HOẶC Dự báo tiêu vượt ngân sách
+            should_alert = (percent_used >= threshold_pct) or (projected_spent > budget_amount)
+            
+            if should_alert:
+                # 5. Throttling: Kiểm tra lần cuối gửi cảnh báo (tránh spam)
+                last_alert = budget.get("last_alert_sent")
+                if last_alert:
+                    # Chuyển timestamp về VN time
+                    last_dt = last_alert.astimezone(VN_TZ)
+                    if last_dt.date() == now.date():
+                        # Đã gửi cảnh báo hôm nay rồi
+                        print(f"[Budget Alert] Throttled: Đã gửi cảnh báo cho {target_cat} hôm nay.")
+                        continue
+                
+                # 6. Kích hoạt AI tạo nội dung và gửi
+                alert_data = {
+                    "category": target_cat,
+                    "budget_amount": budget_amount,
+                    "current_spent": total_spent,
+                    "percent_used": percent_used,
+                    "projected_spent": projected_spent
+                }
+                generate_ai_budget_warning(firebase_uid, alert_data)
+                
+                # 7. Cập nhật last_alert_sent
+                budgets_ref.document(target_cat).update({"last_alert_sent": firestore.SERVER_TIMESTAMP})
+
+    except Exception as e:
+        print(f"[Budget Check Error] {e}")
         traceback.print_exc()
 
