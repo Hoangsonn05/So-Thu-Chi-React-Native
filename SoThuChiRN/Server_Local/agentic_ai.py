@@ -41,8 +41,12 @@ def execute_schedule_report(firebase_uid: str, target_datetime_iso: str, report_
     """ Lưu lịch báo cáo vào Firestore collection 'scheduled_tasks'. """
     db = firestore.client()
     try:
+        print(f"[Execute Tool] schedule_report: target={target_datetime_iso}, type={report_type}")
         # Nhận ISO string, chuyển thành datetime object chuẩn (đã có múi giờ hoặc gán UTC+7)
-        dt = datetime.fromisoformat(target_datetime_iso.replace('Z', '+00:00'))
+        # Python 3.7+ hỗ trợ fromisoformat với múi giờ (+07:00)
+        dt_str = target_datetime_iso.replace('Z', '+00:00')
+        dt = datetime.fromisoformat(dt_str)
+        
         # Đảm bảo lưu đúng định dạng để sau này query dễ dàng
         target_utc = dt.astimezone(timezone.utc)
         
@@ -58,6 +62,7 @@ def execute_schedule_report(firebase_uid: str, target_datetime_iso: str, report_
         return json.dumps({"status": "success", "message": f"Đã lên lịch thành công cho thời gian {dt.strftime('%d/%m/%Y %H:%M')}"}, ensure_ascii=False)
         
     except Exception as e:
+        print(f"[Tool Error] execute_schedule_report: {e}")
         traceback.print_exc()
         return json.dumps({"status": "error", "error": str(e)})
 
@@ -230,29 +235,29 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                 )
             else:
                 db_result = json.dumps({"error": "Unknown function"})
-                
-                # Nếu db_result chứa lỗi từ phía code gọi hàm (do try-except bên trong)
-                # thì AI sẽ tự động đọc json {"error": ...} và có thể xin lỗi user.
-                
-                # Cập nhật danh sách message với tool response
-                messages.append(message) 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "name": function_name,
-                    "content": db_result
-                })
-                
-                payload["messages"] = messages
-                payload.pop("tools", None)
-                payload.pop("tool_choice", None)
-                
-                second_response = requests.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=60)
-                second_response.raise_for_status()
-                second_result = second_response.json()
-                
-                final_answer = second_result['choices'][0]['message']['content']
-                return final_answer.strip()
+            
+            # CẬP NHẬT: Đưa khối lệnh xử lý Tool Response ra ngoài khối if/else
+            # Đảm bảo dù là tool nào thì kết quả cũng được gửi về cho AI tổng hợp
+            
+            # Cập nhật danh sách message với tool response
+            messages.append(message) 
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call["id"],
+                "name": function_name,
+                "content": db_result
+            })
+            
+            payload["messages"] = messages
+            payload.pop("tools", None)
+            payload.pop("tool_choice", None)
+            
+            second_response = requests.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=60)
+            second_response.raise_for_status()
+            second_result = second_response.json()
+            
+            final_answer = second_result['choices'][0]['message']['content']
+            return final_answer.strip()
                 
         elif message.get("content"):
             return message["content"].strip()
