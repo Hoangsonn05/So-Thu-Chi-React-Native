@@ -24,6 +24,18 @@ VN_TZ = timezone(timedelta(hours=7))
 AGENTIC_SYSTEM_PROMPT = """Bạn là "Giám đốc tài chính" AI chủ động của ứng dụng cá nhân Sổ Thu Chi.
 Nhiệm vụ của bạn là giải đáp các thắc mắc về tình hình tài chính của người dùng dựa trên dữ liệu thật, cũng như lên lịch báo cáo và thiết lập cảnh báo ngân sách theo yêu cầu.
 
+BẮT BUỘC TUÂN THỦ PHÂN BIỆT Ý ĐỊNH:
+1. Nếu người dùng nói về một việc ĐÃ XẢY RA (Ví dụ: "Đã tiêu", "Vừa mua", "Hết 50k", "Ăn sáng 30k") -> Đây là ghi chép giao dịch. Vì bạn là Agent truy vấn/báo cáo, nếu thấy ý định này, hãy lịch sự nhắc người dùng rằng bạn chỉ hỗ trợ báo cáo và thiết lập ngân sách.
+2. Nếu người dùng nói về một MỤC TIÊU/GIỚI HẠN trong tương lai (Ví dụ: "Đặt hạn mức", "Ngân sách tháng này là", "Giới hạn chi tiêu", "Cài đặt ngân sách") -> BẮT BUỘC gọi công cụ `set_budget_alert`.
+
+VÍ DỤ (Few-Shot):
+- User: "Hôm nay đi ăn sáng hết 50k" -> Intent: Ghi chép chi tiêu (AI sẽ không gọi tool ngân sách, chỉ trả lời nhắc nhở).
+- User: "Đặt hạn mức ăn uống 5 triệu, báo tôi khi tiêu hết 80%" -> Intent: Gọi tool `set_budget_alert` (category='Ăn uống', budget_amount=5000000, threshold_pct=80).
+- User: "Ngân sách tháng này là 10 triệu" -> Intent: Gọi tool `set_budget_alert` (category='Tất cả', budget_amount=10000000, threshold_pct=80).
+- User: "Tôi muốn giới hạn chi tiêu 1 triệu cho mua sắm" -> Intent: Gọi tool `set_budget_alert` (category='Mua sắm', budget_amount=1000000, threshold_pct=80).
+
+DƯỚI ĐÂY LÀ CÁC CÔNG CỤ CỦA BẠN:
+
 Bạn BẮT BUỘC phải dùng công cụ `query_database` khi người dùng hỏi về:
 - Tổng chi tiêu, thu nhập (ví dụ: "Tháng này tiêu bao nhiêu?", "Báo cáo tuần qua", "Hôm nay tôi tiêu gì?").
 - Số tiền chi cho một danh mục cụ thể (ví dụ: "Tiêu bao nhiêu tiền ăn uống rồi?", "Tiền điện tháng này").
@@ -220,7 +232,7 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
             "type": "function",
             "function": {
                 "name": "set_budget_alert",
-                "description": "Thiết lập hạn mức chi tiêu (ngân sách) cho một danh mục và đặt ngưỡng cảnh báo.",
+                "description": "CHỈ sử dụng công cụ này khi người dùng muốn thiết lập mục tiêu tài chính, hạn mức hoặc ngân sách (từ khóa: đặt hạn mức, đặt ngân sách, giới hạn chi tiêu). KHÔNG sử dụng công cụ này để ghi chép các khoản chi tiêu thông thường.",
                 "parameters": {
                     "type": "object",
                     "properties": {

@@ -939,7 +939,7 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
             
             # Phân tích cơ bản để xem người dùng đang "ghi chép" hay "hỏi đáp/báo cáo"
             lower_text = text.lower()
-            is_query = any(keyword in lower_text for keyword in ["?", "báo cáo", "tổng", "bao nhiêu", "thống kê"])
+            is_query = any(keyword in lower_text for keyword in ["?", "báo cáo", "tổng", "bao nhiêu", "thống kê", "đặt", "hạn mức", "ngân sách", "giới hạn"])
             
             if is_query:
                 background_tasks.add_task(process_agentic_query, bot_token, firebase_uid, chat_id, text)
