@@ -4,6 +4,7 @@ import requests
 import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+from google.api_core.exceptions import FailedPrecondition
 
 from firebase_admin import firestore, messaging
 
@@ -230,6 +231,9 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
             else:
                 db_result = json.dumps({"error": "Unknown function"})
                 
+                # Nếu db_result chứa lỗi từ phía code gọi hàm (do try-except bên trong)
+                # thì AI sẽ tự động đọc json {"error": ...} và có thể xin lỗi user.
+                
                 # Cập nhật danh sách message với tool response
                 messages.append(message) 
                 messages.append({
@@ -256,7 +260,7 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
     except Exception as e:
         print(f"[Agentic AI Error] {e}")
         traceback.print_exc()
-        return None
+        return "Hiện tại hệ thống đang gặp sự cố kết nối hoặc dữ liệu. Bạn vui lòng thử lại sau ít phút nhé!"
 
 # -------------- CRON JOB HÀNG TUẦN --------------
 
@@ -340,6 +344,9 @@ def poll_scheduled_tasks_job():
                         short_body = report_content[:150] + ("..." if len(report_content) > 150 else "")
                         send_fcm_push(uid, title, short_body)
                         
+    except FailedPrecondition as fpe:
+        # Lỗi Index Firestore: Log ra thay vì in toàn bộ traceback hoặc crash
+        print(f"[Polling Job Error] Firestore Error: Index missing or is currently building. Bỏ qua lần quét này. Chi tiết: {fpe}")
     except Exception as e:
         print(f"[Polling Job Error] {e}")
         traceback.print_exc()
