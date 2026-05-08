@@ -480,6 +480,9 @@ def analyze_text_with_gemini(user_text: str) -> dict:
     system_prompt = AI_SYSTEM_PROMPT.format(current_date=today_str)
     
     full_prompt = f"{system_prompt}\n\nUSER INPUT: \"{user_text}\"\n\nJSON OUTPUT:"
+    
+    print(f"\n[AI Request] Đang gửi yêu cầu phân tích văn bản cho AI:")
+    print(f"--- TEXT: '{user_text}' ---")
 
     payload = {
         "model": MODEL_NAME,
@@ -521,6 +524,7 @@ def analyze_text_with_gemini(user_text: str) -> dict:
     try:
         # OpenAI style response: choices[0].message.content
         raw_text = result['choices'][0]['message']['content'].strip()
+        print(f"[AI Response Raw]: '{raw_text}'")
     except (KeyError, IndexError) as e:
         print(f"[OpenRouter Response Error] Could not extract text: {e}")
         raise ValueError("AI trả về định dạng không mong muốn.")
@@ -544,6 +548,7 @@ def analyze_text_with_gemini(user_text: str) -> dict:
         if first >= 0 and last > first:
             parsed = json.loads(cleaned[first:last+1])
         else:
+            print(f"[AI Parse Error] Không tìm thấy JSON hợp lệ trong phản hồi. Văn bản: '{cleaned}'")
             raise
 
     # ---- Map Gemini Response (trả về schema cũ: type, amount, category, note, date) ----
@@ -898,6 +903,8 @@ async def process_notification(req: NotificationProcessRequest, background_tasks
     """
     # Gộp title và text để AI dễ phân tích
     combined_text = f"Thông báo từ ứng dụng {req.package_name}: {req.title} - {req.text}"
+    print(f"\n[Backend API] Nhận thông báo từ {req.package_name}")
+    print(f"[Backend API] Nội dung kết hợp: '{combined_text}'")
     
     # process_ai_and_save xử lý phân tích và lưu, nếu thành công sẽ gửi FCM push notification
     background_tasks.add_task(process_ai_and_save, None, req.firebase_uid, None, combined_text, True)
