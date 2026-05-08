@@ -102,9 +102,10 @@ export default function LoginScreen({ onNavigateToRegister, onLoginSuccess }: Lo
           await db.saveUserLocal(null, email, null, password, null);
         }
 
-        syncService.pullTransactions(uid).catch((e: any) => {
-          console.error('Background pull error:', e);
-        });
+        // Đã xóa syncService.pullTransactions(uid) ở đây vì:
+        // App.tsx sẽ tự động gọi syncService.startRealtimeListener(uid) ngay khi đăng nhập thành công.
+        // onSnapshot của Firebase mặc định sẽ kéo toàn bộ dữ liệu ban đầu về máy dưới dạng 'added',
+        // nên nếu để pullTransactions ở đây sẽ gây ra lỗi nhân đôi dữ liệu (Duplicate).
         
         // 4. ĐĂNG KÝ SESSION THIẾT BỊ (Chạy ngầm)
         const { sessionService } = require('../../services/SessionService');

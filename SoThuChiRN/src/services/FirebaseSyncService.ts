@@ -121,6 +121,7 @@ class FirebaseSyncService {
             createdBy: String(data.createdBy || uid),
             deviceName: String(data.deviceName || ''),
             deviceId: String(data.deviceId || ''),
+            is_synced: 1, // Đánh dấu là đã đồng bộ để tránh bị push ngược lại lên Firebase
           };
 
           // Bỏ qua giao dịch không hợp lệ

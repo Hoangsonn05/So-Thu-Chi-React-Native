@@ -176,10 +176,12 @@ class DatabaseHelper {
   async addTransaction(t: Transaction): Promise<number> {
     const db = await this.open();
     const searchContent = ` ${normalizeForSearch(`${t.note} ${t.category}`)} `;
-    // is_synced gets 0 for newly added online/offline transactions, waiting for background sync
+    // Nếu t.is_synced được set (ví dụ từ FirebaseSyncService kéo về), thì dùng giá trị đó, ngược lại mặc định là 0 (chưa sync)
+    const isSynced = t.is_synced !== undefined ? t.is_synced : 0;
+    
     const result = await db.runAsync(
       `INSERT INTO ${TABLE_TRANSACTIONS} (${COLUMN_AMOUNT}, ${COLUMN_NOTE}, ${COLUMN_CATEGORY}, ${COLUMN_DATE}, ${COLUMN_TYPE}, ${COLUMN_CREATED_BY}, ${COLUMN_DEVICE_NAME}, ${COLUMN_DEVICE_ID}, ${COLUMN_SEARCH_CONTENT}, ${COLUMN_IS_SYNCED}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [t.amount, t.note, t.category, t.date, t.type, t.createdBy ?? '', t.deviceName ?? '', t.deviceId ?? '', searchContent, 0]
+      [t.amount, t.note, t.category, t.date, t.type, t.createdBy ?? '', t.deviceName ?? '', t.deviceId ?? '', searchContent, isSynced]
     );
     return result.lastInsertRowId;
   }

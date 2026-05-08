@@ -14,6 +14,7 @@ import requests
 from openpyxl.styles import Border, Font, Side
 from openpyxl.utils import get_column_letter
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response
+from contextlib import asynccontextmanager
 from firebase_admin import credentials, firestore, messaging
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -113,7 +114,35 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
-app = FastAPI(title="Firestore Export & Telegram Bot API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from agentic_ai import generate_weekly_summary_job
+    scheduler = AsyncIOScheduler()
+    # Chạy vào 20:00 tối Chủ Nhật hàng tuần
+    scheduler.add_job(generate_weekly_summary_job, 'cron', day_of_week='sun', hour=20, minute=0)
+    scheduler.start()
+    print("[Scheduler] Đã khởi động Cron Job hàng tuần (Chủ nhật 20:00).")
+    yield
+    scheduler.shutdown()
+
+app = FastAPI(title="Firestore Export & Telegram Bot API", lifespan=lifespan)
+
+def process_agentic_query(bot_token: str, firebase_uid: str, chat_id: int, text: str):
+    """ Xử lý Agentic AI Workflow cho các câu truy vấn báo cáo tài chính """
+    from agentic_ai import chat_with_agentic_ai
+    try:
+        print(f"[Agentic] Bắt đầu xử lý truy vấn cho UID: {firebase_uid}")
+        reply = chat_with_agentic_ai(text, firebase_uid)
+        if reply:
+            send_telegram_message(bot_token, chat_id, reply)
+        else:
+            send_telegram_message(bot_token, chat_id, "Xin lỗi, tôi không thể truy xuất thông tin lúc này.")
+    except Exception as e:
+        print(f"[Agentic Error] {e}")
+        traceback.print_exc()
+        send_telegram_message(bot_token, chat_id, "Đã có lỗi xảy ra khi xử lý yêu cầu của bạn.")
 
 
 class ExportEmailRequest(BaseModel):
@@ -878,6 +907,16 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
         if not firebase_uid:
             send_telegram_message(bot_token, chat_id, "⚠️ Bot chua duoc lien ket tren app So Thu Chi.")
             return {"status": "ok"}
+            
+        # Lưu chat_id vào Firestore để Cron Job có thể gửi báo cáo chủ động
+        try:
+            db.collection("users").document(firebase_uid).set({
+                "telegramConfig": {
+                    "chatId": chat_id
+                }
+            }, merge=True)
+        except Exception as e:
+            print(f"[Webhook] Lỗi khi lưu chatId: {e}")
 
         if text.lower() == "/start":
             msg = "✅ Bot da ket noi voi So Thu Chi!\nBan co the nhan tin nhu: 'An sang 30k'"
@@ -889,7 +928,14 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
             waiting_msg = "⏳ Bot đã lắng nghe yêu cầu của bạn rồi ạ , vui lòng đợi 1 xíu nha..."
             send_telegram_message(bot_token, chat_id, waiting_msg)
             
-            background_tasks.add_task(process_ai_and_save, bot_token, firebase_uid, chat_id, text)
+            # Phân tích cơ bản để xem người dùng đang "ghi chép" hay "hỏi đáp/báo cáo"
+            lower_text = text.lower()
+            is_query = any(keyword in lower_text for keyword in ["?", "báo cáo", "tổng", "bao nhiêu", "thống kê"])
+            
+            if is_query:
+                background_tasks.add_task(process_agentic_query, bot_token, firebase_uid, chat_id, text)
+            else:
+                background_tasks.add_task(process_ai_and_save, bot_token, firebase_uid, chat_id, text)
 
     return {"status": "ok"}
 
