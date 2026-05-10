@@ -79,7 +79,7 @@ def _download_telegram_photo(bot_token: str, file_id: str) -> bytes:
     return img_resp.content
 
 
-def _call_vision_api(image_bytes: bytes) -> dict:
+def _call_vision_api(image_bytes: bytes, caption: str = "", current_time: str = "") -> dict:
     """
     Gọi OpenRouter Vision API với ảnh base64.
     Trả về dict đã parse từ JSON response.
@@ -87,6 +87,8 @@ def _call_vision_api(image_bytes: bytes) -> dict:
     # Encode ảnh thành base64 data URI
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
     image_data_uri = f"data:image/jpeg;base64,{b64_image}"
+
+    user_text = f"Hãy phân tích hóa đơn trong ảnh và trả về JSON theo định dạng yêu cầu. \n\nCURRENT SYSTEM TIME: {current_time}. \nUSER CAPTION: {caption}. \n\nTIME RULE: If the USER CAPTION implies a specific time or day (e.g., 'hôm nay/today', 'hôm qua/yesterday', 'sáng nay'), you MUST calculate and output the timestamp based on the CURRENT SYSTEM TIME and the caption. In this case, completely IGNORE the date printed on the receipt. ONLY use the printed receipt date if the user caption is empty or contains no time context."
 
     payload = {
         "model": VISION_MODEL,
@@ -106,7 +108,7 @@ def _call_vision_api(image_bytes: bytes) -> dict:
                     },
                     {
                         "type": "text",
-                        "text": "Hãy phân tích hóa đơn trong ảnh và trả về JSON theo định dạng yêu cầu."
+                        "text": user_text
                     }
                 ]
             }
@@ -198,7 +200,7 @@ def _build_firestore_payload_from_ocr(ocr_data: dict, firebase_uid: str) -> dict
     }
 
 
-def parse_receipt_image(bot_token: str, file_id: str, firebase_uid: str, chat_id: int):
+def parse_receipt_image(bot_token: str, file_id: str, firebase_uid: str, chat_id: int, caption: str = "", current_time: str = ""):
     """
     Hàm chính — được gọi bởi BackgroundTasks trong main.py.
 
@@ -217,8 +219,8 @@ def parse_receipt_image(bot_token: str, file_id: str, firebase_uid: str, chat_id
         print(f"[Vision OCR] Đã tải ảnh: {len(image_bytes):,} bytes")
 
         # Bước 2: Gọi Vision API
-        print("[Vision OCR] Đang gửi ảnh đến Vision model...")
-        ocr_data = _call_vision_api(image_bytes)
+        print(f"[Vision OCR] Đang gửi ảnh đến Vision model với caption='{caption}'...")
+        ocr_data = _call_vision_api(image_bytes, caption, current_time)
         print(f"[Vision OCR] Kết quả OCR: {ocr_data}")
 
         # Validate amount
@@ -255,12 +257,21 @@ def parse_receipt_image(bot_token: str, file_id: str, firebase_uid: str, chat_id
         merchant_line = f"🏪 Nơi mua: {merchant}\n" if merchant else ""
         note_line = f"📝 Ghi chú: {note}\n" if note else ""
 
+        # Định dạng thời gian hiển thị: DD/MM/YYYY HH:MM
+        display_time = "N/A"
+        if "timestamp" in firestore_payload:
+            ts = firestore_payload["timestamp"]
+            # Chuyển từ datetime object sang string VN
+            dt_vn = ts.astimezone(VN_TZ)
+            display_time = dt_vn.strftime("%d/%m/%Y %H:%M")
+
         reply_msg = (
             f"✅ *Đã ghi nhận hóa đơn thành công!*\n\n"
             f"💰 Số tiền: *{amount:,}đ*\n"
             f"🏷️ Danh mục: {category}\n"
             f"{merchant_line}"
             f"{note_line}"
+            f"🕒 Thời gian: {display_time}\n"
             f"{confidence_icon} Độ chính xác OCR: {int(confidence * 100)}%"
         )
 
