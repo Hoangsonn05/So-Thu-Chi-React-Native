@@ -946,6 +946,30 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
             else:
                 background_tasks.add_task(process_ai_and_save, bot_token, firebase_uid, chat_id, text)
 
+    # --- DISPATCHER: Xử lý ảnh hóa đơn (Photo Handler) ---
+    # Tách biệt hoàn toàn khỏi luồng text phía trên
+    elif "message" in data and "photo" in data.get("message", {}):
+        chat_id = data["message"]["chat"]["id"]
+
+        # Xác định chủ nhân của bot
+        firebase_uid = _get_uid_from_bot_token(bot_token)
+        if not firebase_uid:
+            send_telegram_message(bot_token, chat_id, "⚠️ Bot chưa được liên kết trên app Sổ Thu Chi.")
+            return {"status": "ok"}
+
+        # Lấy ảnh resolution cao nhất (photo[-1] là kích thước lớn nhất)
+        photos = data["message"]["photo"]
+        file_id = photos[-1]["file_id"]
+
+        print(f"[Webhook] Nhận ảnh hóa đơn từ chat_id={chat_id}, uid={firebase_uid}, file_id={file_id}")
+
+        # Phản hồi ngay để người dùng biết bot đang xử lý
+        send_telegram_message(bot_token, chat_id, "🔍 Đang đọc hóa đơn, vui lòng chờ...")
+
+        # Đẩy vào background để không block webhook response
+        from vision_parser import parse_receipt_image
+        background_tasks.add_task(parse_receipt_image, bot_token, file_id, firebase_uid, chat_id)
+
     return {"status": "ok"}
 
 
