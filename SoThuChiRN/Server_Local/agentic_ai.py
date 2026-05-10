@@ -6,6 +6,7 @@ import calendar
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from google.api_core.exceptions import FailedPrecondition
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from firebase_admin import firestore, messaging
 
@@ -130,7 +131,7 @@ def execute_query_database(firebase_uid: str, category: str, timeframe: str) -> 
         end_utc = end_date.astimezone(timezone.utc)
 
         query = db.collection("users").document(firebase_uid).collection("transactions")
-        query = query.where("timestamp", ">=", start_utc).where("timestamp", "<=", end_utc)
+        query = query.where(filter=FieldFilter("timestamp", ">=", start_utc)).where(filter=FieldFilter("timestamp", "<=", end_utc))
         
         docs = query.stream()
         
@@ -376,7 +377,7 @@ def poll_scheduled_tasks_job():
         now_utc = datetime.now(timezone.utc)
         
         # Lấy các task pending và đã đến/qua hạn
-        tasks_query = db.collection("scheduled_tasks").where("status", "==", "pending").where("target_datetime", "<=", now_utc)
+        tasks_query = db.collection("scheduled_tasks").where(filter=FieldFilter("status", "==", "pending")).where(filter=FieldFilter("target_datetime", "<=", now_utc))
         docs = tasks_query.stream()
         
         for doc in docs:
@@ -506,10 +507,10 @@ def check_budget_thresholds(firebase_uid: str, category: str, new_amount: float)
             target_cat = budget["category"]
             
             query = db.collection("users").document(firebase_uid).collection("transactions")
-            query = query.where("type", "==", 0).where("isDeleted", "==", False).where("timestamp", ">=", start_utc)
+            query = query.where(filter=FieldFilter("type", "==", 0)).where(filter=FieldFilter("isDeleted", "==", False)).where(filter=FieldFilter("timestamp", ">=", start_utc))
             
             if target_cat != "Tất cả":
-                query = query.where("category", "==", target_cat)
+                query = query.where(filter=FieldFilter("category", "==", target_cat))
             
             docs = query.stream()
             total_spent = 0

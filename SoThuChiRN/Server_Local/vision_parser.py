@@ -26,7 +26,7 @@ OPENROUTER_API_KEY = os.getenv(
     "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"
 )
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-VISION_MODEL = "nvidia/nemotron-nano-12b-2-vl:free"
+VISION_MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
 TELEGRAM_API_BASE = "https://api.telegram.org/bot"
 
 VN_TZ = timezone(timedelta(hours=7))
