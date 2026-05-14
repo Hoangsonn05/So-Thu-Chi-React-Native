@@ -66,6 +66,14 @@ ADDITIONAL FINANCIAL QUERY TOOLS:
 Supported timeframes: today, current_week, last_week, current_month, last_month, all_time.
 All totals, aggregates, rankings, comparisons, and percentages MUST be computed by Python tools from Firestore data before you answer.
 You may only explain the returned tool result. Do not calculate or invent financial numbers yourself.
+Only describe computed values returned by tools. Do not infer causes or trends not explicitly present in tool output.
+
+TELEGRAM RESPONSE STYLE:
+- Keep replies mobile-friendly: short paragraphs and compact lines.
+- Use light emoji only when helpful, for example 📊, 💸, 🏪, 🔝.
+- Format VND amounts with dot separators, for example 57.948.200đ.
+- Do not use raw markdown bullets like "- **...".
+- If evidence is missing, say the data is not available instead of guessing.
 """
 
 
@@ -645,6 +653,15 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                 "tool_call_id": tool_call["id"],
                 "name": function_name,
                 "content": db_result
+            })
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Format the final Telegram reply for mobile. Use light emoji, short lines, "
+                    "and VND dot separators like 57.948.200đ. Avoid raw markdown such as '- **...'. "
+                    "Only describe computed values returned by tools. Do not infer causes or trends "
+                    "not explicitly present in tool output."
+                )
             })
             
             payload["messages"] = messages
