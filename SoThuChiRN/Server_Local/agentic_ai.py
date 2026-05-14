@@ -3,6 +3,9 @@ import json
 import requests
 import traceback
 import calendar
+import hashlib
+import re
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from google.api_core.exceptions import FailedPrecondition
@@ -716,6 +719,286 @@ def send_tg_msg(bot_token: str, chat_id: int, text: str):
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"[CronJob] Lỗi gửi Telegram: {e}")
+
+# -------------- RECURRING EXPENSE DETECTION --------------
+
+RECURRING_LOOKBACK_DAYS = 90
+RECURRING_CYCLES_DAYS = (7, 14, 30, 31)
+RECURRING_AMOUNT_TOLERANCE = 0.10
+RECURRING_MIN_CONFIDENCE_TO_NOTIFY = 0.65
+RECURRING_NOTIFY_COOLDOWN_DAYS = 30
+
+
+def _strip_accents(value: str) -> str:
+    normalized = unicodedata.normalize("NFD", value or "")
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+
+def _normalize_recurring_text(value: str) -> str:
+    text = _strip_accents(value or "").lower()
+    text = re.sub(r"\b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b", " ", text)
+    text = re.sub(r"\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b", " ", text)
+    text = re.sub(r"\b(ngay|date|luc|vao)\s+\d{1,2}\b", " ", text)
+    text = re.sub(r"\b\d+([.,]\d+)?\s*(k|nghin|ngan|tr|trieu|d|đ|vnd|dong)\b", " ", text)
+    text = re.sub(r"\b\d{4,}\b", " ", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\b(thanh\s*toan|payment|gd|giao\s*dich|hoa\s*don|bill|auto|autopay|ck|chuyen\s*khoan)\b", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _clean_recurring_display_text(value: str) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b", " ", text)
+    text = re.sub(r"\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b", " ", text)
+    text = re.sub(r"\b\d+([.,]\d+)?\s*(k|nghìn|ngàn|tr|triệu|d|đ|vnd|đồng)\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"[_*`~|]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -:;,.")
+    return text[:80]
+
+
+def _transaction_datetime(data: dict) -> Optional[datetime]:
+    ts = data.get("timestamp")
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+    date_text = data.get("date")
+    if isinstance(date_text, str):
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(date_text, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+    return None
+
+
+def _format_vnd(amount: float) -> str:
+    return f"{int(round(amount)):,.0f}".replace(",", ".") + "đ"
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _amounts_are_close(amounts: list[float]) -> bool:
+    if len(amounts) < 2:
+        return False
+    baseline = _median(amounts)
+    if baseline <= 0:
+        return False
+    return all(abs(amount - baseline) / baseline <= RECURRING_AMOUNT_TOLERANCE for amount in amounts)
+
+
+def _best_cycle(dates: list[datetime]) -> tuple[Optional[int], float]:
+    if len(dates) < 2:
+        return None, 0.0
+    gaps = [(dates[i] - dates[i - 1]).days for i in range(1, len(dates))]
+    if not gaps:
+        return None, 0.0
+
+    best_cycle = None
+    best_score = 0.0
+    for cycle in RECURRING_CYCLES_DAYS:
+        matched = sum(1 for gap in gaps if abs(gap - cycle) <= 3)
+        score = matched / len(gaps)
+        if score > best_score:
+            best_cycle = cycle
+            best_score = score
+    return best_cycle, best_score
+
+
+def _recurring_confidence(occurrences: int, amount_score: float, interval_score: float) -> float:
+    occurrence_score = 1.0 if occurrences >= 3 else 0.72
+    confidence = (occurrence_score * 0.35) + (amount_score * 0.30) + (interval_score * 0.35)
+    return round(min(confidence, 0.99), 2)
+
+
+def _recurring_doc_ref(db, firebase_uid: str, insight_id: str):
+    return (
+        db.collection("users")
+        .document(firebase_uid)
+        .collection("finance_insights")
+        .document("recurring_expenses")
+        .collection("items")
+        .document(insight_id)
+    )
+
+
+def _build_recurring_message(item: dict) -> str:
+    label = item.get("merchant_or_note") or "Khoản chi"
+    amount = _format_vnd(float(item.get("estimated_amount", 0) or 0))
+    frequency = int(item.get("frequency_days", 0) or 0)
+    if frequency in (30, 31):
+        period = "mỗi tháng"
+    elif frequency == 14:
+        period = "mỗi 2 tuần"
+    elif frequency == 7:
+        period = "mỗi tuần"
+    else:
+        period = f"mỗi {frequency} ngày"
+    return f"Phát hiện khoản chi lặp lại: {label} khoảng {amount} {period}."
+
+
+def _should_notify_recurring(existing: dict, item: dict, now: datetime) -> bool:
+    if item.get("confidence", 0) < RECURRING_MIN_CONFIDENCE_TO_NOTIFY:
+        return False
+    if not existing:
+        return True
+
+    old_amount = float(existing.get("estimated_amount", 0) or 0)
+    new_amount = float(item.get("estimated_amount", 0) or 0)
+    amount_changed = old_amount > 0 and abs(new_amount - old_amount) / old_amount > 0.15
+    frequency_changed = existing.get("frequency_days") != item.get("frequency_days")
+
+    last_notified = existing.get("last_notified_at")
+    if isinstance(last_notified, datetime):
+        last_notified = last_notified if last_notified.tzinfo else last_notified.replace(tzinfo=timezone.utc)
+        if now - last_notified < timedelta(days=RECURRING_NOTIFY_COOLDOWN_DAYS):
+            return amount_changed or frequency_changed
+
+    return amount_changed or frequency_changed or existing.get("status") != "active"
+
+
+def detect_recurring_expenses(firebase_uid: str) -> list[dict]:
+    db = firestore.client()
+    now = datetime.now(timezone.utc)
+    start_utc = now - timedelta(days=RECURRING_LOOKBACK_DAYS)
+    notified_items = []
+
+    try:
+        query = (
+            db.collection("users")
+            .document(firebase_uid)
+            .collection("transactions")
+            .where(filter=FieldFilter("timestamp", ">=", start_utc))
+            .where(filter=FieldFilter("timestamp", "<=", now))
+        )
+
+        groups: dict[str, list[dict]] = {}
+        for doc in query.stream():
+            data = doc.to_dict() or {}
+            if data.get("isDeleted", False) is True or data.get("type") != 0:
+                continue
+
+            tx_dt = _transaction_datetime(data)
+            if not tx_dt:
+                continue
+
+            try:
+                amount = float(data.get("amount", 0) or 0)
+            except (TypeError, ValueError):
+                amount = 0
+            if amount <= 0:
+                continue
+
+            merchant = _normalize_recurring_text(str(data.get("merchant", "")))
+            source = _normalize_recurring_text(str(data.get("source", "")))
+            note = _normalize_recurring_text(str(data.get("note", "")))
+            display_label = (
+                _clean_recurring_display_text(data.get("merchant", ""))
+                or _clean_recurring_display_text(data.get("note", ""))
+                or _clean_recurring_display_text(data.get("source", ""))
+            )
+            key_parts = [part for part in (merchant, source, note) if part]
+            if not key_parts:
+                continue
+
+            key = "|".join(key_parts)
+            groups.setdefault(key, []).append({
+                "amount": amount,
+                "timestamp": tx_dt,
+                "merchant_or_note": display_label or merchant or note or source,
+            })
+
+        user_doc = db.collection("users").document(firebase_uid).get()
+        user_data = user_doc.to_dict() if user_doc.exists else {}
+        tg_config = (user_data or {}).get("telegramConfig") or {}
+        bot_token = tg_config.get("botToken")
+        chat_id = tg_config.get("chatId")
+        active_ids = set()
+
+        for key, txs in groups.items():
+            if len(txs) < 2:
+                continue
+
+            txs.sort(key=lambda tx: tx["timestamp"])
+            amounts = [tx["amount"] for tx in txs]
+            if not _amounts_are_close(amounts):
+                continue
+
+            dates = [tx["timestamp"] for tx in txs]
+            frequency_days, interval_score = _best_cycle(dates)
+            if not frequency_days or interval_score <= 0:
+                continue
+
+            estimated_amount = _median(amounts)
+            max_deviation = max(abs(amount - estimated_amount) / estimated_amount for amount in amounts)
+            amount_score = 1.0 - min(max_deviation, RECURRING_AMOUNT_TOLERANCE) / RECURRING_AMOUNT_TOLERANCE
+            confidence = _recurring_confidence(len(txs), amount_score, interval_score)
+            insight_id = hashlib.sha1(f"{key}|{frequency_days}".encode("utf-8")).hexdigest()[:24]
+            active_ids.add(insight_id)
+
+            doc_ref = _recurring_doc_ref(db, firebase_uid, insight_id)
+            existing_snap = doc_ref.get()
+            existing = existing_snap.to_dict() if existing_snap.exists else {}
+            item = {
+                "merchant_or_note": txs[-1]["merchant_or_note"],
+                "estimated_amount": round(estimated_amount, 2),
+                "frequency_days": frequency_days,
+                "occurrences": len(txs),
+                "first_seen": dates[0],
+                "last_seen": dates[-1],
+                "confidence": confidence,
+                "status": "active",
+                "normalized_key": key,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            }
+            if not existing:
+                item["created_at"] = firestore.SERVER_TIMESTAMP
+                item["last_notified_at"] = None
+
+            should_notify = _should_notify_recurring(existing, item, now)
+            if should_notify and bot_token and chat_id:
+                send_tg_msg(bot_token, chat_id, _build_recurring_message(item))
+                item["last_notified_at"] = firestore.SERVER_TIMESTAMP
+                notified_items.append({"id": insight_id, **item})
+            elif existing and "last_notified_at" in existing:
+                item["last_notified_at"] = existing.get("last_notified_at")
+
+            doc_ref.set(item, merge=True)
+
+        existing_docs = (
+            db.collection("users")
+            .document(firebase_uid)
+            .collection("finance_insights")
+            .document("recurring_expenses")
+            .collection("items")
+            .stream()
+        )
+        for snap in existing_docs:
+            if snap.id not in active_ids and (snap.to_dict() or {}).get("status") == "active":
+                snap.reference.set({"status": "inactive", "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
+
+    except Exception as e:
+        print(f"[Recurring Detection Error] uid={firebase_uid}: {e}")
+        traceback.print_exc()
+
+    return notified_items
+
+
+def recurring_expenses_daily_job():
+    print(f"[Recurring Job] Scan started: {datetime.now(tz=VN_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    db = firestore.client()
+    try:
+        for user_doc in db.collection("users").stream():
+            detect_recurring_expenses(user_doc.id)
+    except Exception as e:
+        print(f"[Recurring Job Error] {e}")
+        traceback.print_exc()
 
 # -------------- POLLING JOB HÀNG PHÚT --------------
 

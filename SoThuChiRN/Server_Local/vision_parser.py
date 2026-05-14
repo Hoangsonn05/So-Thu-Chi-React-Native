@@ -15,8 +15,12 @@ import json
 import base64
 import traceback
 import requests
+import re
+import uuid
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+from firebase_admin import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
@@ -200,6 +204,117 @@ def _build_firestore_payload_from_ocr(ocr_data: dict, firebase_uid: str) -> dict
     }
 
 
+def _normalize_duplicate_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _serialize_pending_payload(payload: dict) -> dict:
+    serializable = {}
+    for key, value in payload.items():
+        if key == "lastUpdated":
+            continue
+        if isinstance(value, datetime):
+            serializable[key] = value.isoformat()
+        else:
+            serializable[key] = value
+    return serializable
+
+
+def _has_duplicate_ocr_transaction(firebase_uid: str, payload: dict, ocr_data: dict) -> bool:
+    db = firestore.client()
+    ts = payload.get("timestamp")
+    if not isinstance(ts, datetime):
+        return False
+
+    source_key = _normalize_duplicate_text(ocr_data.get("merchant") or payload.get("source"))
+    if not source_key:
+        return False
+
+    start = ts - timedelta(hours=24)
+    end = ts + timedelta(hours=24)
+    amount = int(payload.get("amount", 0) or 0)
+
+    query = (
+        db.collection("users")
+        .document(firebase_uid)
+        .collection("transactions")
+        .where(filter=FieldFilter("timestamp", ">=", start))
+        .where(filter=FieldFilter("timestamp", "<=", end))
+    )
+
+    for doc in query.stream():
+        data = doc.to_dict() or {}
+        if data.get("isDeleted") is True or data.get("type") != 0:
+            continue
+        try:
+            existing_amount = int(data.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            existing_amount = 0
+        if existing_amount != amount:
+            continue
+
+        existing_source = _normalize_duplicate_text(data.get("merchant") or data.get("source"))
+        if existing_source and (
+            existing_source == source_key
+            or existing_source in source_key
+            or source_key in existing_source
+        ):
+            return True
+
+    return False
+
+
+def _build_pending_ocr_keyboard(action_id: str, save_text: str) -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": save_text, "callback_data": f"save_pending_ocr:{action_id}"}],
+            [{"text": "Bỏ qua", "callback_data": f"cancel_pending_ocr:{action_id}"}],
+        ]
+    }
+
+
+def _format_pending_ocr_time(payload: dict) -> str:
+    ts = payload.get("timestamp")
+    if isinstance(ts, datetime):
+        return ts.astimezone(VN_TZ).strftime("%d/%m/%Y %H:%M")
+    return str(ts or "N/A")
+
+
+def _create_pending_ocr_action(firebase_uid: str, reason: str, payload: dict, ocr_data: dict) -> str:
+    db = firestore.client()
+    action_id = uuid.uuid4().hex
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    db.collection("users").document(firebase_uid).collection("pending_actions").document(action_id).set({
+        "action_type": "ocr_confirm",
+        "reason": reason,
+        "payload": _serialize_pending_payload(payload),
+        "ocr_data": ocr_data,
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "expires_at": expires_at,
+        "status": "pending",
+    })
+    return action_id
+
+
+def _send_pending_ocr_confirmation(bot_token: str, chat_id: int, reason: str, action_id: str, payload: dict, ocr_data: dict, send_telegram_message):
+    if reason == "duplicate":
+        msg = "Hóa đơn này có vẻ đã tồn tại. Bạn vẫn muốn lưu lại không?"
+        keyboard = _build_pending_ocr_keyboard(action_id, "Vẫn lưu")
+    else:
+        confidence = float(ocr_data.get("confidence_score", 0) or 0)
+        msg = (
+            "Bot chưa chắc về thông tin hóa đơn này. Bạn xác nhận lưu không?\n\n"
+            f"Số tiền: {int(payload.get('amount', 0) or 0):,}đ\n"
+            f"Danh mục: {payload.get('category', 'Khác')}\n"
+            f"Nơi mua: {payload.get('source', '')}\n"
+            f"Ghi chú: {payload.get('note', '')}\n"
+            f"Thời gian: {_format_pending_ocr_time(payload)}\n"
+            f"Độ chính xác OCR: {int(confidence * 100)}%"
+        )
+        keyboard = _build_pending_ocr_keyboard(action_id, "Lưu")
+    send_telegram_message(bot_token, chat_id, msg, reply_markup=keyboard)
+
+
 def parse_receipt_image(bot_token: str, file_id: str, firebase_uid: str, chat_id: int, caption: str = "", current_time: str = ""):
     """
     Hàm chính — được gọi bởi BackgroundTasks trong main.py.
@@ -230,6 +345,27 @@ def parse_receipt_image(bot_token: str, file_id: str, firebase_uid: str, chat_id
 
         # Bước 3: Build payload & lưu Firestore
         firestore_payload = _build_firestore_payload_from_ocr(ocr_data, firebase_uid)
+        confidence = float(ocr_data.get("confidence_score", 0) or 0)
+        reason = None
+        if _has_duplicate_ocr_transaction(firebase_uid, firestore_payload, ocr_data):
+            reason = "duplicate"
+        elif confidence < 0.75:
+            reason = "low_confidence"
+
+        if reason:
+            action_id = _create_pending_ocr_action(firebase_uid, reason, firestore_payload, ocr_data)
+            _send_pending_ocr_confirmation(
+                bot_token,
+                chat_id,
+                reason,
+                action_id,
+                firestore_payload,
+                ocr_data,
+                send_telegram_message,
+            )
+            print(f"[Vision OCR] Pending action created: {action_id}, reason={reason}")
+            return
+
         doc_id = _save_transaction_atomic(firebase_uid, firestore_payload, "ocr")
         print(f"[Vision OCR] Đã lưu Firestore: {doc_id}")
 
@@ -249,7 +385,6 @@ def parse_receipt_image(bot_token: str, file_id: str, firebase_uid: str, chat_id
         category = firestore_payload["category"]
         merchant = ocr_data.get("merchant", "")
         note = ocr_data.get("note", "")
-        confidence = ocr_data.get("confidence_score", 0)
 
         # Hiển thị độ tin cậy để người dùng biết
         confidence_icon = "🟢" if confidence >= 0.85 else ("🟡" if confidence >= 0.6 else "🔴")

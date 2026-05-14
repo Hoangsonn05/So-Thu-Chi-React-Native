@@ -122,10 +122,11 @@ db = firestore.client()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    from agentic_ai import poll_scheduled_tasks_job
+    from agentic_ai import poll_scheduled_tasks_job, recurring_expenses_daily_job
     scheduler = AsyncIOScheduler()
     # Chạy polling mỗi 1 phút
     scheduler.add_job(poll_scheduled_tasks_job, 'interval', minutes=1)
+    scheduler.add_job(recurring_expenses_daily_job, 'cron', hour=9, minute=0, timezone=VN_TZ)
     scheduler.start()
     print("[Scheduler] Đã khởi động Polling Job mỗi phút.")
     yield
@@ -474,7 +475,164 @@ def _answer_telegram_callback(bot_token: str, callback_query_id: str, text: Opti
         traceback.print_exc()
 
 
+def _is_safe_pending_action_id(action_id: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{32}", action_id or ""))
+
+
+def _pending_action_ref(firebase_uid: str, action_id: str):
+    return db.collection("users").document(firebase_uid).collection("pending_actions").document(action_id)
+
+
+def _parse_pending_timestamp(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return value
+    return value
+
+
+def _rehydrate_pending_ocr_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    restored = dict(payload or {})
+    restored.pop("id", None)
+    restored["timestamp"] = _parse_pending_timestamp(restored.get("timestamp"))
+    restored["lastUpdated"] = firestore.SERVER_TIMESTAMP
+    return restored
+
+
+@firestore.transactional
+def _claim_pending_ocr_action(transaction, action_ref, now_utc: datetime):
+    snap = action_ref.get(transaction=transaction)
+    if not snap.exists:
+        return None, "not_found"
+
+    data = snap.to_dict() or {}
+    if data.get("action_type") != "ocr_confirm":
+        return None, "invalid"
+
+    status = data.get("status")
+    if status != "pending":
+        return None, status or "invalid"
+
+    expires_at = data.get("expires_at")
+    if isinstance(expires_at, datetime):
+        expires_at = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < now_utc:
+            transaction.update(action_ref, {
+                "status": "cancelled",
+                "cancel_reason": "expired",
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            })
+            return None, "expired"
+
+    transaction.update(action_ref, {
+        "status": "processing",
+        "processing_at": firestore.SERVER_TIMESTAMP,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    })
+    return data, None
+
+
+def _handle_pending_ocr_callback(bot_token: str, firebase_uid: str, chat_id: int, callback_query_id: str, callback_data: str):
+    try:
+        action, action_id = callback_data.split(":", 1)
+    except ValueError:
+        _answer_telegram_callback(bot_token, callback_query_id, "Thao tác không hợp lệ.")
+        return
+
+    if action not in {"save_pending_ocr", "cancel_pending_ocr"} or not _is_safe_pending_action_id(action_id):
+        _answer_telegram_callback(bot_token, callback_query_id, "Thao tác không hợp lệ.")
+        return
+
+    action_ref = _pending_action_ref(firebase_uid, action_id)
+
+    if action == "cancel_pending_ocr":
+        snap = action_ref.get()
+        if not snap.exists:
+            _answer_telegram_callback(bot_token, callback_query_id, "Yêu cầu không còn tồn tại.")
+            send_telegram_message(bot_token, chat_id, "⚠️ Không tìm thấy yêu cầu OCR cần xử lý.")
+            return
+
+        data = snap.to_dict() or {}
+        status = data.get("status")
+        if status == "completed":
+            _answer_telegram_callback(bot_token, callback_query_id, "Yêu cầu đã được lưu trước đó.")
+            send_telegram_message(bot_token, chat_id, "ℹ️ Hóa đơn này đã được lưu trước đó.")
+            return
+        if status == "processing":
+            _answer_telegram_callback(bot_token, callback_query_id, "Yêu cầu đang được xử lý.")
+            send_telegram_message(bot_token, chat_id, "⏳ Yêu cầu OCR đang được xử lý, vui lòng chờ một chút.")
+            return
+
+        action_ref.set({
+            "status": "cancelled",
+            "cancelled_at": firestore.SERVER_TIMESTAMP,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        _answer_telegram_callback(bot_token, callback_query_id, "Đã bỏ qua.")
+        send_telegram_message(bot_token, chat_id, "Đã bỏ qua hóa đơn này. Không có giao dịch nào được lưu.")
+        return
+
+    transaction = db.transaction()
+    pending_data, claim_error = _claim_pending_ocr_action(transaction, action_ref, datetime.now(timezone.utc))
+    if claim_error:
+        messages = {
+            "not_found": "Yêu cầu không còn tồn tại.",
+            "expired": "Yêu cầu đã hết hạn.",
+            "completed": "Yêu cầu đã được lưu trước đó.",
+            "cancelled": "Yêu cầu đã bị bỏ qua.",
+            "processing": "Yêu cầu đang được xử lý.",
+        }
+        msg = messages.get(claim_error, "Yêu cầu không hợp lệ.")
+        _answer_telegram_callback(bot_token, callback_query_id, msg)
+        send_telegram_message(bot_token, chat_id, msg)
+        return
+
+    try:
+        payload = _rehydrate_pending_ocr_payload(pending_data.get("payload", {}))
+        doc_id = _save_transaction_atomic(firebase_uid, payload, "ocr")
+
+        try:
+            _send_fcm_notification(firebase_uid, doc_id, {
+                "amount": payload.get("amount", 0),
+                "category": payload.get("category", "Khác"),
+                "note": payload.get("note", ""),
+                "date": payload.get("date", ""),
+                "source": payload.get("source", ""),
+            })
+        except Exception as fcm_err:
+            print(f"[Pending OCR] FCM error (non-critical): {fcm_err}")
+
+        action_ref.set({
+            "status": "completed",
+            "completed_at": firestore.SERVER_TIMESTAMP,
+            "transaction_id": doc_id,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        _answer_telegram_callback(bot_token, callback_query_id, "Đã lưu hóa đơn.")
+        send_telegram_message(bot_token, chat_id, f"✅ Đã lưu hóa đơn thành giao dịch {doc_id}.")
+    except Exception as e:
+        err = str(e)[:180]
+        print(f"[Pending OCR Save Error] {e}")
+        traceback.print_exc()
+        action_ref.set({
+            "status": "failed",
+            "error": err,
+            "failed_at": firestore.SERVER_TIMESTAMP,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        _answer_telegram_callback(bot_token, callback_query_id, "Không thể lưu hóa đơn.")
+        send_telegram_message(bot_token, chat_id, "⚠️ Không thể lưu hóa đơn lúc này. Vui lòng thử lại sau.")
+
+
 def _handle_transaction_callback(bot_token: str, firebase_uid: str, chat_id: int, callback_query_id: str, callback_data: str):
+    if callback_data.startswith(("save_pending_ocr:", "cancel_pending_ocr:")):
+        _handle_pending_ocr_callback(bot_token, firebase_uid, chat_id, callback_query_id, callback_data)
+        return
+
     if callback_data.startswith("set_cat:"):
         parts = callback_data.split(":", 2)
         if len(parts) != 3:
