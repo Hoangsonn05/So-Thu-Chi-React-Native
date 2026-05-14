@@ -1,5 +1,7 @@
 import os
 import re
+import unicodedata
+import time
 import json
 import tempfile
 import traceback
@@ -40,6 +42,10 @@ MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b:free"
 # Multi transaction parsing is high-risk; keep disabled by default.
 ENABLE_MULTI_TRANSACTION_PARSE = os.getenv("ENABLE_MULTI_TRANSACTION_PARSE", "false").strip().lower() in {"1", "true", "yes", "on"}
 MAX_MULTI_TRANSACTIONS = 5
+
+# Merchant Learning System — giảm gọi AI cho merchant quen thuộc
+# Mặc định false: behavior hiện tại không đổi khi chưa bật
+ENABLE_MERCHANT_LEARNING = os.getenv("ENABLE_MERCHANT_LEARNING", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 # --- TIMEZONE Việt Nam (UTC+7) ---
 VN_TZ = timezone(timedelta(hours=7))
@@ -606,6 +612,13 @@ def _handle_pending_ocr_callback(bot_token: str, firebase_uid: str, chat_id: int
         except Exception as fcm_err:
             print(f"[Pending OCR] FCM error (non-critical): {fcm_err}")
 
+        # [MERCHANT LEARNING] Hoc rule tu OCR transaction da confirm va luu thanh cong
+        if ENABLE_MERCHANT_LEARNING:
+            try:
+                update_merchant_rule_from_transaction(firebase_uid, payload)
+            except Exception as rule_err:
+                print(f"[MerchantRule] Non-critical OCR rule error: {rule_err}")
+
         action_ref.set({
             "status": "completed",
             "completed_at": firestore.SERVER_TIMESTAMP,
@@ -678,6 +691,14 @@ def _handle_transaction_callback(bot_token: str, firebase_uid: str, chat_id: int
 
         _answer_telegram_callback(bot_token, callback_query_id, "Đã cập nhật danh mục.")
         send_telegram_message(bot_token, chat_id, f"✅ Đã cập nhật danh mục giao dịch {doc_id} thành: {new_category}")
+
+        # [MERCHANT LEARNING] Hoc tu user correction
+        if ENABLE_MERCHANT_LEARNING:
+            try:
+                source_text = tx_data.get("source", "") or tx_data.get("note", "")
+                update_merchant_rule_from_correction(firebase_uid, source_text, new_category, tx_type)
+            except Exception as rule_err:
+                print(f"[MerchantRule] Non-critical correction error: {rule_err}")
         return
 
     try:
@@ -1334,6 +1355,347 @@ def _send_saved_transaction_telegram_message(bot_token: str, chat_id: int, parse
     )
     send_telegram_message(bot_token, chat_id, msg, reply_markup=_build_transaction_action_keyboard(doc_id))
 
+
+# ==========================================
+# MERCHANT LEARNING SYSTEM HELPERS
+# ==========================================
+
+# In-memory cache: key = "{uid}:__all__", value = {"rules": list, "cached_at": float}
+_merchant_rule_cache: dict[str, dict] = {}
+MERCHANT_CACHE_TTL_SECONDS = 300  # 5 phút
+
+
+def normalize_merchant_key(text: str) -> str:
+    """Chuẩn hóa text thành merchant key: lowercase, no-accents, only letters+spaces, max 50 chars."""
+    if not text or not text.strip():
+        return ""
+    s = text.lower().strip()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    s = re.sub(r"[^a-z\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:50]
+
+
+def extract_amount_vnd(text: str) -> Optional[int]:
+    """
+    Tìm số tiền VND trong text.
+    Trả về int nếu tìm được đúng 1 amount rõ ràng, None nếu không tìm được hoặc ambiguous.
+    """
+    if not text:
+        return None
+
+    matches: list[int] = []
+
+    # tỷ
+    for m in re.finditer(r'(\d+(?:[.,]\d+)?)\s*(?:tỷ|ty)\b', text, re.IGNORECASE):
+        try:
+            matches.append(int(float(m.group(1).replace(",", ".")) * 1_000_000_000))
+        except ValueError:
+            pass
+
+    # triệu/tr
+    for m in re.finditer(r'(\d+(?:[.,]\d+)?)\s*(?:triệu|trieu|tr)\b', text, re.IGNORECASE):
+        try:
+            matches.append(int(float(m.group(1).replace(",", ".")) * 1_000_000))
+        except ValueError:
+            pass
+
+    # k/K/nghìn/ngàn (chỉ nếu chưa có match tr/tỷ)
+    if not matches:
+        for m in re.finditer(r'(\d+(?:[.,]\d+)?)\s*(?:k|K|nghìn|nghin|ngàn|ngan)\b', text, re.IGNORECASE):
+            try:
+                matches.append(int(float(m.group(1).replace(",", ".")) * 1_000))
+            except ValueError:
+                pass
+
+    # số nguyên >= 4 chữ số (fallback khi không có đơn vị)
+    if not matches:
+        for m in re.finditer(r'\b(\d{4,})\b', text):
+            try:
+                matches.append(int(m.group(1)))
+            except ValueError:
+                pass
+
+    if len(matches) == 1 and matches[0] > 0:
+        return matches[0]
+    return None  # 0 hoặc >1 match → ambiguous
+
+
+def _is_likely_multi_transaction_text(text: str) -> bool:
+    """Kiểm tra nhanh: text có >= 2 số tiền riêng biệt → coi là multi-tx → không bypass AI."""
+    amounts: list[str] = []
+    for m in re.finditer(
+        r'(\d+(?:[.,]\d+)?)\s*(?:tỷ|ty|triệu|trieu|tr|k|K|nghìn|nghin|ngàn|ngan)\b',
+        text, re.IGNORECASE
+    ):
+        amounts.append(m.group(0))
+    if not amounts:
+        amounts = re.findall(r'\b\d{4,}\b', text)
+    return len(amounts) >= 2
+
+
+def _invalidate_merchant_cache(firebase_uid: str) -> None:
+    """Xóa cache của user để force reload từ Firestore lần sau."""
+    keys_to_delete = [k for k in _merchant_rule_cache if k.startswith(f"{firebase_uid}:")]
+    for k in keys_to_delete:
+        _merchant_rule_cache.pop(k, None)
+
+
+def _load_merchant_rules_for_user(firebase_uid: str) -> list[dict]:
+    """Load tất cả merchant rules của user từ cache hoặc Firestore."""
+    cache_key = f"{firebase_uid}:__all__"
+    now = time.time()
+    cached = _merchant_rule_cache.get(cache_key)
+    if cached and (now - cached["cached_at"]) < MERCHANT_CACHE_TTL_SECONDS:
+        return cached["rules"]
+    try:
+        rules_ref = (
+            db.collection("users")
+            .document(firebase_uid)
+            .collection("merchant_rules")
+        )
+        rules = [doc.to_dict() for doc in rules_ref.stream() if doc.to_dict()]
+        _merchant_rule_cache[cache_key] = {"rules": rules, "cached_at": now}
+        return rules
+    except Exception as e:
+        print(f"[MerchantRule] Load error: {e}")
+        return []
+
+
+def find_matching_merchant_rule(firebase_uid: str, user_text: str) -> Optional[dict]:
+    """
+    Tìm merchant rule phù hợp nhất với user_text dựa trên token subset matching.
+    Trả về rule dict hoặc None.
+    """
+    if not user_text or not firebase_uid:
+        return None
+    normalized_input = normalize_merchant_key(user_text)
+    if not normalized_input or len(normalized_input) < 3:
+        return None
+    input_tokens = set(normalized_input.split())
+    if not input_tokens:
+        return None
+
+    rules = _load_merchant_rules_for_user(firebase_uid)
+    best_rule: Optional[dict] = None
+    best_score = 0.0
+
+    for rule in rules:
+        merchant_key = rule.get("merchant_key", "")
+        if not merchant_key:
+            continue
+        key_tokens = set(merchant_key.split())
+        if not key_tokens:
+            continue
+        # Tất cả token của rule phải nằm trong input
+        if not key_tokens.issubset(input_tokens):
+            continue
+        overlap_ratio = len(key_tokens) / max(len(input_tokens), 1)
+        confidence = float(rule.get("confidence", 0.5))
+        score = overlap_ratio * confidence
+        if score > best_score:
+            best_score = score
+            best_rule = rule
+
+    if best_rule and best_score >= 0.3:
+        return best_rule
+    return None
+
+
+def update_merchant_rule_from_transaction(firebase_uid: str, transaction: dict) -> None:
+    """
+    Tự động học merchant rule sau khi transaction lưu thành công.
+    Guards: category != 'Khác' (trừ user_corrected), amount > 0, source/note đủ rõ.
+    """
+    if not ENABLE_MERCHANT_LEARNING:
+        return
+
+    category = transaction.get("category", "")
+    amount = transaction.get("amount", 0)
+    source = str(transaction.get("source", "")).strip()
+    note = str(transaction.get("note", "")).strip()
+    tx_type = int(transaction.get("type", 0))
+    is_user_corrected = transaction.get("_source_type") == "user_corrected"
+
+    # Guards
+    if not category:
+        return
+    if category == "Khác" and not is_user_corrected:
+        return
+    if not isinstance(amount, (int, float)) or amount <= 0:
+        return
+
+    # Chọn merchant text: ưu tiên source (Momo, bank...), fallback note
+    _generic = {"tiền mặt", "tien mat", "cash", "telegram bot", "telegram", ""}
+    merchant_text = source if source.lower() not in _generic else note
+    if not merchant_text or len(merchant_text) < 3:
+        return
+
+    merchant_key = normalize_merchant_key(merchant_text)
+    if not merchant_key or len(merchant_key) < 3:
+        return
+
+    try:
+        rule_ref = (
+            db.collection("users")
+            .document(firebase_uid)
+            .collection("merchant_rules")
+            .document(merchant_key[:50])
+        )
+        now_ts = firestore.SERVER_TIMESTAMP
+        rule_snap = rule_ref.get()
+
+        if rule_snap.exists:
+            current_conf = float((rule_snap.to_dict() or {}).get("confidence", 0.5))
+            rule_ref.update({
+                "category": category,
+                "type": tx_type,
+                "usage_count": firestore.Increment(1),
+                "confidence": min(0.95, current_conf + 0.05),
+                "last_used_at": now_ts,
+                "updated_at": now_ts,
+            })
+        else:
+            rule_ref.set({
+                "merchant": merchant_text[:100],
+                "merchant_key": merchant_key[:50],
+                "category": category,
+                "type": tx_type,
+                "source": "ai_learned",
+                "usage_count": 1,
+                "confidence": 0.5,
+                "created_at": now_ts,
+                "last_used_at": now_ts,
+                "last_corrected_at": None,
+                "updated_at": now_ts,
+            })
+
+        _invalidate_merchant_cache(firebase_uid)
+        print(f"[MerchantRule] Learned '{merchant_key}' → '{category}' for uid={firebase_uid}")
+    except Exception as e:
+        print(f"[MerchantRule] update_from_transaction error: {e}")
+
+
+def update_merchant_rule_from_correction(
+    firebase_uid: str, source_text: str, new_category: str, tx_type: int
+) -> None:
+    """
+    Cập nhật merchant rule khi user manually sửa category qua Telegram button.
+    Tăng confidence + 0.2, set last_corrected_at, source = 'user_corrected'.
+    """
+    if not ENABLE_MERCHANT_LEARNING:
+        return
+    if not source_text or len(source_text.strip()) < 3:
+        return
+    if not new_category:
+        return
+
+    merchant_key = normalize_merchant_key(source_text)
+    if not merchant_key or len(merchant_key) < 3:
+        return
+
+    try:
+        rule_ref = (
+            db.collection("users")
+            .document(firebase_uid)
+            .collection("merchant_rules")
+            .document(merchant_key[:50])
+        )
+        now_ts = firestore.SERVER_TIMESTAMP
+        rule_snap = rule_ref.get()
+
+        if rule_snap.exists:
+            current_conf = float((rule_snap.to_dict() or {}).get("confidence", 0.5))
+            rule_ref.update({
+                "category": new_category,
+                "type": tx_type,
+                "source": "user_corrected",
+                "confidence": min(1.0, current_conf + 0.2),
+                "usage_count": firestore.Increment(1),
+                "last_corrected_at": now_ts,
+                "last_used_at": now_ts,
+                "updated_at": now_ts,
+            })
+        else:
+            # Tạo mới với confidence cao hơn (user đã confirm)
+            rule_ref.set({
+                "merchant": source_text[:100],
+                "merchant_key": merchant_key[:50],
+                "category": new_category,
+                "type": tx_type,
+                "source": "user_corrected",
+                "usage_count": 1,
+                "confidence": 0.7,
+                "created_at": now_ts,
+                "last_used_at": now_ts,
+                "last_corrected_at": now_ts,
+                "updated_at": now_ts,
+            })
+
+        _invalidate_merchant_cache(firebase_uid)
+        print(f"[MerchantRule] Correction '{merchant_key}' → '{new_category}' for uid={firebase_uid}")
+    except Exception as e:
+        print(f"[MerchantRule] update_from_correction error: {e}")
+
+
+def _try_merchant_bypass(firebase_uid: str, text: str, is_auto_detect: bool) -> Optional[dict]:
+    """
+    Thử bypass AI parser dựa trên merchant rule.
+    Trả về parsed dict nếu bypass thành công, None nếu cần gọi AI.
+
+    Điều kiện bypass (TẤT CẢ phải đúng):
+      1. is_auto_detect = False (không phải Android notification)
+      2. Text không phải multi-transaction (< 2 amounts)
+      3. Tìm được rule khớp
+      4. usage_count >= 2 OR confidence >= 0.8
+      5. extract_amount_vnd trả về đúng 1 amount
+    """
+    if is_auto_detect:
+        return None
+
+    if _is_likely_multi_transaction_text(text):
+        print("[MerchantCache] Multi-tx text detected, skipping bypass")
+        return None
+
+    rule = find_matching_merchant_rule(firebase_uid, text)
+    if not rule:
+        return None
+
+    usage_count = int(rule.get("usage_count", 0))
+    confidence = float(rule.get("confidence", 0.0))
+    if usage_count < 2 and confidence < 0.8:
+        print(
+            f"[MerchantCache] Rule '{rule.get('merchant_key')}' not confident enough "
+            f"(count={usage_count}, conf={confidence:.2f}), falling back to AI"
+        )
+        return None
+
+    amount = extract_amount_vnd(text)
+    if not amount or amount <= 0:
+        print("[MerchantCache] Cannot extract unambiguous amount, falling back to AI")
+        return None
+
+    now_vn = datetime.now(tz=VN_TZ)
+    today_str = now_vn.strftime("%d/%m/%Y")
+    merchant_name = rule.get("merchant", "Tiền mặt")
+    category = rule.get("category", "Khác")
+    tx_type = int(rule.get("type", 0))
+
+    print(
+        f"[MerchantCache HIT] merchant='{rule.get('merchant_key')}' "
+        f"category='{category}' amount={amount} type={tx_type}"
+    )
+    return {
+        "type": tx_type,
+        "amount": amount,
+        "category": category,
+        "note": text[:50],
+        "date": today_str,
+        "source": merchant_name,
+    }
+
+
 def _process_ai_and_save_multi(bot_token: Optional[str], firebase_uid: str, chat_id: Optional[int], text: str, is_auto_detect: bool = False):
     omitted_count = 0
     try:
@@ -1369,6 +1731,14 @@ def _process_ai_and_save_multi(bot_token: Optional[str], firebase_uid: str, chat
                 _send_fcm_notification(firebase_uid, doc_id, parsed)
             except Exception as fcm_err:
                 print(f"[FCM] Non-critical error, ignoring: {fcm_err}")
+
+            # [MERCHANT LEARNING] Học rule từ từng item trong batch sau khi lưu thành công
+            if ENABLE_MERCHANT_LEARNING:
+                try:
+                    update_merchant_rule_from_transaction(firebase_uid, parsed)
+                except Exception as rule_err:
+                    print(f"[MerchantRule] Non-critical multi-tx rule error: {rule_err}")
+
 
             if parsed.get("type") == 0:
                 try:
@@ -1411,7 +1781,14 @@ def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Op
             return
 
         print("[MULTI_PARSE] using legacy flow")
-        parsed = analyze_text_with_gemini(text)
+
+        # [MERCHANT LEARNING] Thử bypass AI nếu đủ điều kiện (không áp dụng cho is_auto_detect)
+        parsed = None
+        if ENABLE_MERCHANT_LEARNING:
+            parsed = _try_merchant_bypass(firebase_uid, text, is_auto_detect)
+
+        if parsed is None:
+            parsed = analyze_text_with_gemini(text)
         
         if parsed == "ERROR_TIMEOUT":
             overload_msg = "❌ Xin lỗi bạn, hệ thống AI của Google hiện đang quá tải. Bạn vui lòng thử lại sau ít phút nhé!"
@@ -1434,6 +1811,15 @@ def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Op
             _send_fcm_notification(firebase_uid, doc_id, parsed)
         except Exception as fcm_err:
             print(f"[FCM] Non-critical error, ignoring: {fcm_err}")
+
+        # [MERCHANT LEARNING] Hoc rule tu transaction da luu thanh cong
+        if ENABLE_MERCHANT_LEARNING:
+            try:
+                rule_data = {**parsed, "source": firestore_data.get("source", parsed.get("source", "Tien mat"))}
+                update_merchant_rule_from_transaction(firebase_uid, rule_data)
+            except Exception as rule_err:
+                print(f"[MerchantRule] Non-critical post-save error: {rule_err}")
+
 
         # 4c. KIỂM TRA NGÂN SÁCH (Phase 3 - Dynamic Budgeting)
         # Chỉ kiểm tra cho các khoản CHI TIÊU (type == 0)
