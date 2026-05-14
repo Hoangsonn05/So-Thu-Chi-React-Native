@@ -37,6 +37,10 @@ OPENROUTER_API_KEY = "sk-or-v1-17a950d2e3d87bd86d002c022570fb71ec6570006cd1ec72f
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b:free"
 
+# Multi transaction parsing is high-risk; keep disabled by default.
+ENABLE_MULTI_TRANSACTION_PARSE = False
+MAX_MULTI_TRANSACTIONS = 5
+
 # --- TIMEZONE Việt Nam (UTC+7) ---
 VN_TZ = timezone(timedelta(hours=7))
 
@@ -792,6 +796,161 @@ def analyze_text_with_gemini(user_text: str) -> dict:
     }
 
 
+def _normalize_ai_transaction_item(parsed: dict, user_text: str, today_str: str) -> dict:
+    tx_type = int(parsed.get("type", 0))
+    if tx_type not in (0, 1):
+        tx_type = 0
+
+    try:
+        amount = int(parsed.get("amount", 0))
+    except (TypeError, ValueError):
+        try:
+            amount = int(float(parsed.get("amount", 0)))
+        except (TypeError, ValueError):
+            amount = 0
+
+    if amount <= 0:
+        raise ValueError(f"Invalid amount: {amount}")
+
+    category = parsed.get("category", "Kh\u00e1c")
+    valid_cats = EXPENSE_CATEGORIES if tx_type == 0 else INCOME_CATEGORIES
+    if category not in valid_cats:
+        category = "Kh\u00e1c"
+
+    note = str(parsed.get("note", user_text))[:50]
+
+    date_str = parsed.get("date", today_str)
+    try:
+        datetime.strptime(date_str, "%d/%m/%Y")
+    except ValueError:
+        date_str = today_str
+
+    return {
+        "type": tx_type,
+        "amount": amount,
+        "category": category,
+        "note": note,
+        "date": date_str,
+        "source": str(parsed.get("source", "Ti\u1ec1n m\u1eb7t")),
+    }
+
+def analyze_text_multi_transactions(user_text: str) -> list[dict]:
+    """
+    High-risk multi transaction parser. Returns a normalized list of transaction dicts.
+    Legacy analyze_text_with_gemini() remains the fallback and is not modified.
+    """
+    now_vn = datetime.now(tz=VN_TZ)
+    today_str = now_vn.strftime("%d/%m/%Y")
+
+    multi_prompt = f"""{AI_SYSTEM_PROMPT.format(current_date=today_str)}
+
+## MULTI-TRANSACTION OUTPUT RULES:
+1. Output ONLY a raw JSON array. No markdown, no code fences, no explanation, no extra text.
+2. Each array item must be one transaction object with EXACTLY these fields:
+   - "type"
+   - "amount"
+   - "category"
+   - "note"
+   - "date"
+   - "source"
+3. If the user's message contains only one transaction, still output an array with exactly one item.
+4. Split clearly separate spending/income entries into separate array items.
+5. Do not invent transactions that are not present in the user's text.
+"""
+
+    full_prompt = f"{multi_prompt}\n\nUSER INPUT: \"{user_text}\"\n\nJSON ARRAY OUTPUT:"
+
+    print(f"\n[AI Multi Request] Äang gá»­i yÃªu cáº§u phÃ¢n tÃ­ch nhiá»u giao dá»‹ch:")
+    print(f"--- TEXT: '{user_text}' ---")
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {
+                "role": "user",
+                "content": full_prompt
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(
+            OPENROUTER_API_URL,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://github.com/Hoangsonn05/So-Thu-Chi-React-Native",
+                "X-Title": "So Thu Chi App"
+            },
+            timeout=60,
+        )
+    except requests.exceptions.ReadTimeout:
+        print("[OpenRouter Timeout] AI khÃ´ng pháº£n há»“i ká»‹p trong 60s")
+        return "ERROR_TIMEOUT"
+    except Exception as e:
+        print(f"[OpenRouter Multi Request Error] {e}")
+        raise e
+
+    if response.status_code != 200:
+        print(f"\n====== OPENROUTER MULTI API ERROR ({response.status_code}) ======")
+        print(f"Details: {response.text}")
+        print("===============================================================\n")
+        raise Exception(f"OpenRouter API rejected the request. Error: {response.text}")
+
+    result = response.json()
+
+    try:
+        raw_text = result['choices'][0]['message']['content'].strip()
+        print(f"[AI Multi Response Raw]: '{raw_text}'")
+    except (KeyError, IndexError) as e:
+        print(f"[OpenRouter Multi Response Error] Could not extract text: {e}")
+        raise ValueError("AI tráº£ vá» Ä‘á»‹nh dáº¡ng khÃ´ng mong muá»‘n.")
+
+    if not raw_text:
+        raise ValueError("AI tráº£ vá» rá»—ng, khÃ´ng thá»ƒ parse.")
+
+    cleaned = raw_text
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        first_array = cleaned.find('[')
+        last_array = cleaned.rfind(']')
+        if first_array >= 0 and last_array > first_array:
+            parsed = json.loads(cleaned[first_array:last_array+1])
+        else:
+            first_obj = cleaned.find('{')
+            last_obj = cleaned.rfind('}')
+            if first_obj >= 0 and last_obj > first_obj:
+                parsed = json.loads(cleaned[first_obj:last_obj+1])
+            else:
+                print(f"[AI Multi Parse Error] KhÃ´ng tÃ¬m tháº¥y JSON há»£p lá»‡. VÄƒn báº£n: '{cleaned}'")
+                raise
+
+    if isinstance(parsed, dict):
+        parsed_items = [parsed]
+    elif isinstance(parsed, list):
+        parsed_items = parsed
+    else:
+        raise ValueError("AI multi tráº£ vá» JSON khÃ´ng pháº£i object hoáº·c array.")
+
+    normalized_items = []
+    for item in parsed_items:
+        if not isinstance(item, dict):
+            raise ValueError("AI multi tráº£ vá» item khÃ´ng pháº£i object.")
+        normalized_items.append(_normalize_ai_transaction_item(item, user_text, today_str))
+
+    if not normalized_items:
+        raise ValueError("AI multi khÃ´ng tráº£ vá» giao dá»‹ch nÃ o.")
+
+    return normalized_items
+
+
 @firestore.transactional
 def _atomic_counter_and_write(transaction, counter_ref, tx_doc_ref, firestore_data):
     """
@@ -994,6 +1153,82 @@ def _handle_help_command(bot_token: str, chat_id: int):
     )
 
 
+def _send_saved_transaction_telegram_message(bot_token: str, chat_id: int, parsed: dict, doc_id: str):
+    type_label = "Thu nhap" if parsed["type"] == 1 else "Chi tieu"
+    amt = f"{parsed['amount']:,}d"
+    cat_emoji = CATEGORY_EMOJIS.get(parsed["category"], "")
+    source = parsed.get("source", "Ti\u1ec1n m\u1eb7t")
+    msg = (
+        f"Da ghi nhan thanh cong!\n\n"
+        f"Loai: {type_label}\n"
+        f"So tien: {amt}\n"
+        f"Nguon: {source}\n"
+        f"{cat_emoji} Danh muc: {parsed['category']}\n"
+        f"Ghi chu: {parsed['note']}\n"
+        f"Ngay: {parsed['date']}\n"
+        f"ID: {doc_id}"
+    )
+    send_telegram_message(bot_token, chat_id, msg, reply_markup=_build_transaction_action_keyboard(doc_id))
+
+def _process_ai_and_save_multi(bot_token: Optional[str], firebase_uid: str, chat_id: Optional[int], text: str, is_auto_detect: bool = False):
+    omitted_count = 0
+    try:
+        parsed_items = analyze_text_multi_transactions(text)
+    except Exception as multi_err:
+        print(f"[AI Multi Fallback] Multi parse failed, falling back to legacy analyzer: {multi_err}")
+        parsed_items = [analyze_text_with_gemini(text)]
+
+    if parsed_items == "ERROR_TIMEOUT" or any(item == "ERROR_TIMEOUT" for item in parsed_items):
+        overload_msg = "AI is overloaded. Please try again later."
+        if bot_token and chat_id:
+            send_telegram_message(bot_token, chat_id, overload_msg)
+        return
+
+    if len(parsed_items) > MAX_MULTI_TRANSACTIONS:
+        omitted_count = len(parsed_items) - MAX_MULTI_TRANSACTIONS
+        parsed_items = parsed_items[:MAX_MULTI_TRANSACTIONS]
+
+    id_prefix = "at" if is_auto_detect else "reqtele"
+    saved_count = 0
+    skipped_count = 0
+
+    for parsed in parsed_items:
+        try:
+            print(f"[AI Multi Item Result] {parsed}")
+            firestore_data = _build_firestore_payload(parsed, firebase_uid)
+            doc_id = _save_transaction_atomic(firebase_uid, firestore_data, id_prefix)
+            saved_count += 1
+
+            try:
+                _send_fcm_notification(firebase_uid, doc_id, parsed)
+            except Exception as fcm_err:
+                print(f"[FCM] Non-critical error, ignoring: {fcm_err}")
+
+            if parsed.get("type") == 0:
+                try:
+                    from agentic_ai import check_budget_thresholds
+                    check_budget_thresholds(firebase_uid, parsed.get("category", "Kh\u00e1c"), float(parsed.get("amount", 0)))
+                except Exception as budget_err:
+                    print(f"[Budget Check] Non-critical error, ignoring: {budget_err}")
+
+            if bot_token and chat_id:
+                _send_saved_transaction_telegram_message(bot_token, chat_id, parsed, doc_id)
+        except Exception as item_err:
+            skipped_count += 1
+            print(f"[AI Multi Item Error] Skipping item due to error: {item_err}")
+            traceback.print_exc()
+
+    if bot_token and chat_id and (len(parsed_items) > 1 or skipped_count > 0 or omitted_count > 0):
+        summary_msg = f"Tong ket: da luu {saved_count} giao dich."
+        if skipped_count > 0:
+            summary_msg += f"\nBo qua {skipped_count} giao dich do loi du lieu/luu tru."
+        if omitted_count > 0:
+            summary_msg += f"\nBo qua {omitted_count} giao dich vi vuot gioi han an toan {MAX_MULTI_TRANSACTIONS} giao dich/lan."
+        send_telegram_message(bot_token, chat_id, summary_msg)
+
+    if saved_count == 0:
+        raise ValueError("No transaction was saved.")
+
 def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Optional[int], text: str, is_auto_detect: bool = False):
     """
     Background Task — KHÔNG có network call nào trong Firestore Transaction.
@@ -1003,6 +1238,10 @@ def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Op
         print(f"[Process] chat_id={chat_id}, uid={firebase_uid}, text='{text[:50]}'")
 
         # 2. Gọi AI — NGOÀI transaction
+        if ENABLE_MULTI_TRANSACTION_PARSE:
+            _process_ai_and_save_multi(bot_token, firebase_uid, chat_id, text, is_auto_detect)
+            return
+
         parsed = analyze_text_with_gemini(text)
         
         if parsed == "ERROR_TIMEOUT":
