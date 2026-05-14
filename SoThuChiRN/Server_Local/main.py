@@ -384,7 +384,7 @@ def export_email(body: ExportEmailRequest):
 # CÁC HÀM XỬ LÝ TELEGRAM BOT VÀ AI (MỚI)
 # ==========================================
 
-def send_telegram_message(bot_token: str, chat_id: int, text: str):
+def send_telegram_message(bot_token: str, chat_id: int, text: str, reply_markup: Optional[dict] = None):
     """Hàm hỗ trợ gửi tin nhắn lại cho người dùng qua Telegram.
     Sử dụng token động của từng user."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -392,6 +392,10 @@ def send_telegram_message(bot_token: str, chat_id: int, text: str):
         "chat_id": chat_id,
         "text": text,
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+        print("[Telegram Reply Markup]", reply_markup)
+        print("[Telegram Payload]", payload)
     try:
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code != 200:
@@ -401,6 +405,76 @@ def send_telegram_message(bot_token: str, chat_id: int, text: str):
     except Exception as e:
         print(f"[Telegram] Lỗi gửi tin nhắn: {e}")
         traceback.print_exc()
+
+
+def _build_transaction_action_keyboard(doc_id: str) -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Đúng", "callback_data": f"confirm:{doc_id}"}],
+            [{"text": "🏷️ Sửa danh mục", "callback_data": f"edit_category:{doc_id}"}],
+            [{"text": "🗑️ Xóa", "callback_data": f"delete:{doc_id}"}],
+        ]
+    }
+
+
+def _is_safe_transaction_doc_id(doc_id: str) -> bool:
+    return bool(re.fullmatch(r"(reqtele|at|ocr)_\d+", doc_id or ""))
+
+
+def _answer_telegram_callback(bot_token: str, callback_query_id: str, text: Optional[str] = None):
+    url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code != 200:
+            print(f"[Telegram Callback Error] Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"[Telegram] Lá»—i tráº£ lá»i callback: {e}")
+        traceback.print_exc()
+
+
+def _handle_transaction_callback(bot_token: str, firebase_uid: str, chat_id: int, callback_query_id: str, callback_data: str):
+    try:
+        action, doc_id = callback_data.split(":", 1)
+    except ValueError:
+        _answer_telegram_callback(bot_token, callback_query_id, "Thao tác không hợp lệ.")
+        return
+
+    if action not in {"confirm", "edit_category", "delete"} or not _is_safe_transaction_doc_id(doc_id):
+        _answer_telegram_callback(bot_token, callback_query_id, "Giao dịch không hợp lệ.")
+        return
+
+    if action == "confirm":
+        _answer_telegram_callback(bot_token, callback_query_id, "Đã xác nhận.")
+        send_telegram_message(bot_token, chat_id, f"✅ Đã xác nhận giao dịch {doc_id}.")
+        return
+
+    if action == "edit_category":
+        _answer_telegram_callback(bot_token, callback_query_id, "Sửa danh mục chưa hỗ trợ trên Telegram.")
+        send_telegram_message(bot_token, chat_id, "🏷️ Tính năng sửa danh mục trên Telegram sẽ được bổ sung sau. Bạn có thể sửa trong app Sổ Thu Chi.")
+        return
+
+    tx_ref = db.collection("users").document(firebase_uid).collection("transactions").document(doc_id)
+    tx_snap = tx_ref.get()
+    if not tx_snap.exists:
+        _answer_telegram_callback(bot_token, callback_query_id, "Không tìm thấy giao dịch.")
+        send_telegram_message(bot_token, chat_id, f"⚠️ Không tìm thấy giao dịch {doc_id}, nên bot chưa xóa gì cả.")
+        return
+
+    tx_data = tx_snap.to_dict() or {}
+    if tx_data.get("isDeleted") is True:
+        _answer_telegram_callback(bot_token, callback_query_id, "Giao dịch đã được xóa trước đó.")
+        send_telegram_message(bot_token, chat_id, f"ℹ️ Giao dịch {doc_id} đã được xóa trước đó.")
+        return
+
+    tx_ref.update({
+        "isDeleted": True,
+        "lastUpdated": firestore.SERVER_TIMESTAMP,
+    })
+    _answer_telegram_callback(bot_token, callback_query_id, "Đã xóa giao dịch.")
+    send_telegram_message(bot_token, chat_id, f"🗑️ Đã xóa giao dịch {doc_id}.")
 
 
 def _get_uid_from_bot_token(bot_token: str) -> Optional[str]:
@@ -877,7 +951,7 @@ def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Op
                 f"Ngày: {parsed['date']}\n"
                 f"ID: {doc_id}"
             )
-            send_telegram_message(bot_token, chat_id, msg)
+            send_telegram_message(bot_token, chat_id, msg, reply_markup=_build_transaction_action_keyboard(doc_id))
 
     except json.JSONDecodeError as e:
         print(f"[AI Parse Error] {e}")
@@ -906,6 +980,31 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
     except Exception as e:
         print(f"[Webhook] Failed to parse JSON: {e}")
         return {"status": "ok"}  
+
+    if "callback_query" in data:
+        callback_query = data.get("callback_query") or {}
+        callback_query_id = callback_query.get("id")
+        callback_data = callback_query.get("data", "")
+        message = callback_query.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+
+        if not callback_query_id:
+            return {"status": "ok"}
+
+        firebase_uid = _get_uid_from_bot_token(bot_token)
+        if not firebase_uid:
+            _answer_telegram_callback(bot_token, callback_query_id, "Bot chưa được liên kết.")
+            if chat_id:
+                send_telegram_message(bot_token, chat_id, "⚠️ Bot chưa được liên kết trên app Sổ Thu Chi.")
+            return {"status": "ok"}
+
+        if not chat_id:
+            _answer_telegram_callback(bot_token, callback_query_id, "Không tìm thấy chat để phản hồi.")
+            return {"status": "ok"}
+
+        _handle_transaction_callback(bot_token, firebase_uid, chat_id, callback_query_id, callback_data)
+        return {"status": "ok"}
 
     if "message" in data and "text" in data.get("message", {}):
         chat_id = data["message"]["chat"]["id"]
@@ -970,7 +1069,7 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
         print(f"[Webhook] Nhận ảnh hóa đơn từ chat_id={chat_id}, uid={firebase_uid}, file_id={file_id}, caption='{caption}'")
 
         # Phản hồi ngay để người dùng biết bot đang xử lý
-        send_telegram_message(bot_token, chat_id, "🔍 Đang đọc hóa đơn, vui lòng chờ...")
+        send_telegram_message(bot_token, chat_id, "🔍 Đang đọc hóa đơn, vui lòng chờ tớ một tí ...")
 
         # Đẩy vào background để không block webhook response
         from vision_parser import parse_receipt_image
