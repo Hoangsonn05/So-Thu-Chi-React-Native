@@ -46,6 +46,9 @@ MAX_MULTI_TRANSACTIONS = 5
 # Merchant Learning System — giảm gọi AI cho merchant quen thuộc
 # Mặc định false: behavior hiện tại không đổi khi chưa bật
 ENABLE_MERCHANT_LEARNING = os.getenv("ENABLE_MERCHANT_LEARNING", "false").strip().lower() in {"1", "true", "yes", "on"}
+# Bypass AI cho single-tx khi merchant rule đủ chắc (chỉ có hiệu lực khi ENABLE_MERCHANT_LEARNING=true)
+# Mặc định false: chỉ học rule, không bypass AI
+ENABLE_MERCHANT_BYPASS = os.getenv("ENABLE_MERCHANT_BYPASS", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 # --- TIMEZONE Việt Nam (UTC+7) ---
 VN_TZ = timezone(timedelta(hours=7))
@@ -1365,16 +1368,100 @@ _merchant_rule_cache: dict[str, dict] = {}
 MERCHANT_CACHE_TTL_SECONDS = 300  # 5 phút
 
 
+# --- Merchant Learning: noise constants ---
+_NOISE_AMOUNT_RE = re.compile(
+    r"\d+(?:[.,]\d+)?\s*(?:tỷ|ty|triệu|trieu|tr|k|K|nghìn|nghin|ngàn|ngan|đ|d|vnd)\b"
+    r"|\b\d{3,}\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_CURRENCY_TOKENS = frozenset({"k", "d", "vnd", "nghin", "ngan", "tr", "trieu", "ty", "dong"})
+_ACTION_WORDS = frozenset({
+    "mua", "ban", "thanh", "toan", "chuyen", "khoan", "tra",
+    "nap", "rut", "gui", "chi", "thu", "ghi", "vay",
+})
+_SERVICE_GENERIC_PHRASES = (
+    "cuoc dien thoai",
+    "nap the dien thoai",
+    "phi dich vu",
+    "tien dien nuoc",
+    "tien dien",
+    "tien nuoc",
+    "tien nha",
+    "nap tien",
+    "nap the",
+    "dien thoai",
+)  # Ordered: longer phrases first for greedy matching
+_GENERIC_CATEGORY_WORDS = frozenset({
+    "ca", "phe", "ca phe", "cafe", "an", "com", "uong", "tra", "sua",
+    "nuoc", "hang", "sang", "trua", "toi", "chieu", "do",
+    "thoai", "dien",  # fragments sau khi strip service phrases
+})
+_WALLET_PREFIXES = frozenset({
+    "momo", "zalopay", "zalo", "vnpay", "tcb", "vcb", "mbbank",
+    "mb", "techcombank", "vietcombank", "bidv", "vib", "acb", "vpbank",
+    "tpbank", "ocb",
+})
+_MERCHANT_KEY_BLACKLIST = frozenset({
+    "ca", "phe", "ca phe", "cafe", "an", "com", "uong", "tra", "sua",
+    "hang", "nuoc", "do", "sang", "trua", "toi", "chieu",
+    "an sang", "an trua", "an toi", "an com",  # generic meal phrases
+    "tien", "tien mat", "cash", "thanh toan", "chuyen khoan",
+    "mua", "ban", "nap", "rut", "gui",
+    "dien", "thoai", "dien thoai",  # service fragments
+})
+_MIN_MERCHANT_KEY_LENGTH = 3
+
+
 def normalize_merchant_key(text: str) -> str:
-    """Chuẩn hóa text thành merchant key: lowercase, no-accents, only letters+spaces, max 50 chars."""
+    """
+    Chuẩn hóa text thành merchant key sạch.
+    Pipeline: strip amounts → lowercase → remove accents → remove noise tokens.
+    Ví dụ: "mua ca phe Highlands 65k" → "highlands"
+    """
     if not text or not text.strip():
         return ""
-    s = text.lower().strip()
+
+    # Step 1: Strip amount patterns (BEFORE lowercase)
+    s = _NOISE_AMOUNT_RE.sub(" ", text)
+
+    # Step 2: Lowercase
+    s = s.lower().strip()
+
+    # Step 3: Remove accents
     s = unicodedata.normalize("NFD", s)
     s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+    # Step 4: Remove non-letter chars
     s = re.sub(r"[^a-z\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    return s[:50]
+
+    if not s:
+        return ""
+
+    # Step 5: Remove service generic phrases (multi-word)
+    for phrase in _SERVICE_GENERIC_PHRASES:
+        s = re.sub(r"\b" + re.escape(phrase) + r"\b", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # Step 6: Token-level filtering
+    tokens = s.split()
+    tokens = [t for t in tokens if t not in _CURRENCY_TOKENS]
+    tokens = [t for t in tokens if t not in _ACTION_WORDS]
+
+    # Strip wallet prefixes ONLY if other tokens remain
+    non_prefix = [t for t in tokens if t not in _WALLET_PREFIXES]
+    if non_prefix:
+        tokens = non_prefix
+
+    # Strip generic category words; nếu tất cả là generic → trả về "" (key không hợp lệ)
+    non_generic = [t for t in tokens if t not in _GENERIC_CATEGORY_WORDS]
+    tokens = non_generic  # Nếu rỗng → key rỗng → bị reject ở _MIN_MERCHANT_KEY_LENGTH check
+
+    if not tokens:
+        return ""
+
+    result = " ".join(tokens).strip()
+    return result[:50]
 
 
 def extract_amount_vnd(text: str) -> Optional[int]:
@@ -1423,16 +1510,30 @@ def extract_amount_vnd(text: str) -> Optional[int]:
 
 
 def _is_likely_multi_transaction_text(text: str) -> bool:
-    """Kiểm tra nhanh: text có >= 2 số tiền riêng biệt → coi là multi-tx → không bypass AI."""
-    amounts: list[str] = []
-    for m in re.finditer(
-        r'(\d+(?:[.,]\d+)?)\s*(?:tỷ|ty|triệu|trieu|tr|k|K|nghìn|nghin|ngàn|ngan)\b',
-        text, re.IGNORECASE
-    ):
-        amounts.append(m.group(0))
-    if not amounts:
-        amounts = re.findall(r'\b\d{4,}\b', text)
-    return len(amounts) >= 2
+    """
+    True nếu text có khả năng chứa nhiều giao dịch riêng biệt.
+    Tiêu chí 1: >= 2 amounts với đơn vị tiền rõ ràng (k, tr, tỷ, đ, vnd).
+    Tiêu chí 2: >= 2 bare numbers (>= 4 chữ số) + dấu ngắt câu có nghĩa.
+    """
+    # Criterion 1: >= 2 amounts có đơn vị rõ ràng
+    explicit_amounts = re.findall(
+        r'\d+(?:[.,]\d+)?\s*(?:tỷ|ty|triệu|trieu|tr|k|K|nghìn|nghin|ngàn|ngan|đ|vnd)\b',
+        text, re.IGNORECASE,
+    )
+    if len(explicit_amounts) >= 2:
+        return True
+
+    # Criterion 2: >= 2 bare numbers + separator
+    bare_amounts = re.findall(r'\b\d{4,}\b', text)
+    if len(bare_amounts) >= 2:
+        has_separator = bool(re.search(
+            r'[,;]|\bvà\b|\band\b|\bsáng\b|\btrưa\b|\btối\b|\bchiều\b',
+            text, re.IGNORECASE,
+        ))
+        if has_separator:
+            return True
+
+    return False
 
 
 def _invalidate_merchant_cache(firebase_uid: str) -> None:
@@ -1466,24 +1567,31 @@ def _load_merchant_rules_for_user(firebase_uid: str) -> list[dict]:
 def find_matching_merchant_rule(firebase_uid: str, user_text: str) -> Optional[dict]:
     """
     Tìm merchant rule phù hợp nhất với user_text dựa trên token subset matching.
-    Trả về rule dict hoặc None.
+    Có blacklist để loại key quá generic. Ưu tiên rule confidence cao + key dài hơn.
     """
     if not user_text or not firebase_uid:
         return None
     normalized_input = normalize_merchant_key(user_text)
-    if not normalized_input or len(normalized_input) < 3:
+    print(f"[MerchantLearning] normalized_user_text='{normalized_input}'")
+    if not normalized_input or len(normalized_input) < _MIN_MERCHANT_KEY_LENGTH:
+        print("[MerchantLearning] skip_reason=normalized_too_short")
         return None
+    if normalized_input in _MERCHANT_KEY_BLACKLIST:
+        print("[MerchantLearning] skip_reason=blacklisted_input")
+        return None
+
     input_tokens = set(normalized_input.split())
     if not input_tokens:
         return None
 
     rules = _load_merchant_rules_for_user(firebase_uid)
-    best_rule: Optional[dict] = None
-    best_score = 0.0
+    candidates = []
 
     for rule in rules:
         merchant_key = rule.get("merchant_key", "")
-        if not merchant_key:
+        if not merchant_key or len(merchant_key) < _MIN_MERCHANT_KEY_LENGTH:
+            continue
+        if merchant_key in _MERCHANT_KEY_BLACKLIST:
             continue
         key_tokens = set(merchant_key.split())
         if not key_tokens:
@@ -1494,12 +1602,22 @@ def find_matching_merchant_rule(firebase_uid: str, user_text: str) -> Optional[d
         overlap_ratio = len(key_tokens) / max(len(input_tokens), 1)
         confidence = float(rule.get("confidence", 0.5))
         score = overlap_ratio * confidence
-        if score > best_score:
-            best_score = score
-            best_rule = rule
+        # Tie-break: ưu tiên key dài hơn (cụ thể hơn) khi score bằng nhau
+        candidates.append((score, len(key_tokens), rule))
 
-    if best_rule and best_score >= 0.3:
+    if not candidates:
+        print("[MerchantLearning] candidate_rules=none")
+        return None
+
+    print(f"[MerchantLearning] candidate_rules={len(candidates)}")
+    # Sort: score cao nhất trước; cùng score → key dài hơn trước (more specific)
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    best_score, _, best_rule = candidates[0]
+    print(f"[MerchantLearning] matched_rule='{best_rule.get('merchant_key')}' score={best_score:.3f}")
+
+    if best_score >= 0.3:
         return best_rule
+    print(f"[MerchantLearning] skip_reason=score_too_low({best_score:.3f})")
     return None
 
 
@@ -1642,48 +1760,47 @@ def update_merchant_rule_from_correction(
 def _try_merchant_bypass(firebase_uid: str, text: str, is_auto_detect: bool) -> Optional[dict]:
     """
     Thử bypass AI parser dựa trên merchant rule.
-    Trả về parsed dict nếu bypass thành công, None nếu cần gọi AI.
-
-    Điều kiện bypass (TẤT CẢ phải đúng):
-      1. is_auto_detect = False (không phải Android notification)
-      2. Text không phải multi-transaction (< 2 amounts)
-      3. Tìm được rule khớp
-      4. usage_count >= 2 OR confidence >= 0.8
-      5. extract_amount_vnd trả về đúng 1 amount
+    Chỉ được gọi khi ENABLE_MERCHANT_LEARNING=True AND ENABLE_MERCHANT_BYPASS=True.
+    Multi-tx guard đã được xử lý ở process_ai_and_save() trước khi gọi hàm này.
+    Trả về parsed dict nếu bypass thành công, None nếu cần fallback AI.
     """
     if is_auto_detect:
-        return None
-
-    if _is_likely_multi_transaction_text(text):
-        print("[MerchantCache] Multi-tx text detected, skipping bypass")
+        print("[MerchantLearning] skip_reason=is_auto_detect")
         return None
 
     rule = find_matching_merchant_rule(firebase_uid, text)
     if not rule:
+        print("[MerchantLearning] skip_reason=no_rule_match")
         return None
 
     usage_count = int(rule.get("usage_count", 0))
     confidence = float(rule.get("confidence", 0.0))
     if usage_count < 2 and confidence < 0.8:
         print(
-            f"[MerchantCache] Rule '{rule.get('merchant_key')}' not confident enough "
-            f"(count={usage_count}, conf={confidence:.2f}), falling back to AI"
+            f"[MerchantLearning] skip_reason=low_confidence "
+            f"(count={usage_count}, conf={confidence:.2f})"
         )
+        return None
+
+    # Validate category hợp lệ theo tx_type
+    category = rule.get("category", "")
+    tx_type = int(rule.get("type", 0))
+    valid_cats = INCOME_CATEGORIES if tx_type == 1 else EXPENSE_CATEGORIES
+    if not category or category not in valid_cats:
+        print(f"[MerchantLearning] skip_reason=invalid_category('{category}')")
         return None
 
     amount = extract_amount_vnd(text)
     if not amount or amount <= 0:
-        print("[MerchantCache] Cannot extract unambiguous amount, falling back to AI")
+        print("[MerchantLearning] skip_reason=no_unambiguous_amount")
         return None
 
     now_vn = datetime.now(tz=VN_TZ)
     today_str = now_vn.strftime("%d/%m/%Y")
     merchant_name = rule.get("merchant", "Tiền mặt")
-    category = rule.get("category", "Khác")
-    tx_type = int(rule.get("type", 0))
 
     print(
-        f"[MerchantCache HIT] merchant='{rule.get('merchant_key')}' "
+        f"[MerchantLearning] BYPASS merchant='{rule.get('merchant_key')}' "
         f"category='{category}' amount={amount} type={tx_type}"
     )
     return {
@@ -1774,22 +1891,31 @@ def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Op
         print(f"[Process] chat_id={chat_id}, uid={firebase_uid}, text='{text[:50]}'")
         print(f"[MULTI_PARSE] enabled={ENABLE_MULTI_TRANSACTION_PARSE}")
 
-        # 2. Gọi AI — NGOÀI transaction
-        if ENABLE_MULTI_TRANSACTION_PARSE:
+        # 2. Phân loại text → route thích hợp
+        is_multi = _is_likely_multi_transaction_text(text)
+        print(
+            f"[MerchantLearning] text_type={'multi' if is_multi else 'single'} "
+            f"multi_parse={ENABLE_MULTI_TRANSACTION_PARSE} bypass={ENABLE_MERCHANT_BYPASS}"
+        )
+
+        if is_multi and ENABLE_MULTI_TRANSACTION_PARSE:
             print("[MULTI_PARSE] using multi flow")
             _process_ai_and_save_multi(bot_token, firebase_uid, chat_id, text, is_auto_detect)
             return
 
-        print("[MULTI_PARSE] using legacy flow")
-
-        # [MERCHANT LEARNING] Thử bypass AI nếu đủ điều kiện (không áp dụng cho is_auto_detect)
+        # Single-transaction path (hoặc multi text với MULTI_PARSE=false → legacy AI)
         parsed = None
-        if ENABLE_MERCHANT_LEARNING:
+        if not is_multi and ENABLE_MERCHANT_LEARNING and ENABLE_MERCHANT_BYPASS:
             parsed = _try_merchant_bypass(firebase_uid, text, is_auto_detect)
 
         if parsed is None:
+            if is_multi:
+                print("[MerchantLearning] multi text + MULTI_PARSE disabled → FALLBACK_AI")
+            else:
+                print("[MerchantLearning] FALLBACK_AI")
             parsed = analyze_text_with_gemini(text)
-        
+        else:
+            print("[MerchantLearning] BYPASS success, skipping AI call")
         if parsed == "ERROR_TIMEOUT":
             overload_msg = "❌ Xin lỗi bạn, hệ thống AI của Google hiện đang quá tải. Bạn vui lòng thử lại sau ít phút nhé!"
             if bot_token and chat_id:
