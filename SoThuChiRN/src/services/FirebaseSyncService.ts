@@ -20,6 +20,9 @@ import { Transaction } from '../models/Transaction';
 import { transactionEvents } from './TransactionEvents';
 import * as Application from 'expo-application';
 
+// Runtime sync note: Firestore listener handles added/modified/removed.
+// Telegram category edits are upserted by doc_id; soft deletes are removed from local visible cache.
+
 // Firestore unsubscribe function — giữ tham chiếu để hủy khi logout
 type Unsubscribe = () => void;
 
@@ -62,19 +65,35 @@ class FirebaseSyncService {
 
     this.realtimeUnsubscribe = collectionRef.onSnapshot(
       async (snapshot) => {
-        // Chỉ xử lý document ĐƯỢC THÊM MỚI (không xử lý modified/removed)
-        const addedChanges = snapshot.docChanges().filter(
-          (change) => change.type === 'added'
+        // Xử lý added/modified/removed để nhận sửa category và soft-delete từ Telegram.
+        const transactionChanges = snapshot.docChanges().filter(
+          (change) => change.type === 'added' || change.type === 'modified' || change.type === 'removed'
         );
 
-        if (addedChanges.length === 0) return;
+        if (transactionChanges.length === 0) return;
 
         const currentDeviceId = await this.getDeviceId();
-        let hasNewData = false;
+        let hasVisibleDataChanged = false;
 
-        for (const change of addedChanges) {
-          const data = change.doc.data();
+        for (const change of transactionChanges) {
           const docId = change.doc.id;
+          console.log(`[FirebaseSync] Firestore change received: type=${change.type}, docId=${docId}`);
+
+          if (change.type === 'removed') {
+            await db.deleteTransactionByDocId(docId);
+            hasVisibleDataChanged = true;
+            console.log(`[FirebaseSync] Soft delete applied from Firestore removed: type=${change.type}, docId=${docId}`);
+            continue;
+          }
+
+          const data = change.doc.data();
+
+          if (data.isDeleted === true) {
+            await db.deleteTransactionByDocId(docId);
+            hasVisibleDataChanged = true;
+            console.log(`[FirebaseSync] Soft delete applied from isDeleted=true: type=${change.type}, docId=${docId}`);
+            continue;
+          }
 
           // ── Kiểm tra tránh duplicate ──────────────────────────────────────
           // Nếu document do chính thiết bị này push (sync_xxx / legacy_xxx)
@@ -133,19 +152,19 @@ class FirebaseSyncService {
 
           try {
             await db.addTransaction(newTransaction);
-            hasNewData = true;
+            hasVisibleDataChanged = true;
             console.log(
-              `[FirebaseSync] ✅ Inserted from Firestore: ${docId} | ${newTransaction.category} | ${newTransaction.amount}`
+              `[FirebaseSync] Upserted visible Firestore doc: type=${change.type}, docId=${docId}, category=${newTransaction.category}, amount=${newTransaction.amount}`
             );
           } catch (insertErr) {
             console.error(`[FirebaseSync] Insert error for ${docId}:`, insertErr);
           }
         }
 
-        // Chỉ emit event nếu thực sự có dữ liệu mới được insert (Batch refresh)
-        if (hasNewData) {
+        // Chỉ emit event nếu dữ liệu hiển thị thực sự thay đổi (insert/update/delete local).
+        if (hasVisibleDataChanged) {
           transactionEvents.emitChanged();
-          console.log(`[FirebaseSync] 🔔 UI refresh triggered for ${addedChanges.length} items.`);
+          console.log(`[FirebaseSync] 🔔 UI refresh triggered for ${transactionChanges.length} Firestore changes.`);
         }
       },
       (error) => {
@@ -192,6 +211,11 @@ class FirebaseSyncService {
       const cloudTransactions: Transaction[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
+
+        if (data.isDeleted === true) {
+          console.log(`[FirebaseSync] Pull skipped soft-deleted Firestore doc: ${doc.id}`);
+          return;
+        }
 
         let dateStr = '';
         if (data.date && typeof data.date === 'string') {

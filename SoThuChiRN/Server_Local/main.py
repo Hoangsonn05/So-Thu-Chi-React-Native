@@ -421,6 +421,41 @@ def _is_safe_transaction_doc_id(doc_id: str) -> bool:
     return bool(re.fullmatch(r"(reqtele|at|ocr)_\d+", doc_id or ""))
 
 
+def encode_category_slug(category: str) -> Optional[str]:
+    if category in EXPENSE_CATEGORIES:
+        return f"exp_{EXPENSE_CATEGORIES.index(category)}"
+    if category in INCOME_CATEGORIES:
+        return f"inc_{INCOME_CATEGORIES.index(category)}"
+    return None
+
+
+def decode_category_slug(slug: str) -> Optional[str]:
+    exp_match = re.fullmatch(r"exp_(\d+)", slug or "")
+    if exp_match:
+        idx = int(exp_match.group(1))
+        return EXPENSE_CATEGORIES[idx] if 0 <= idx < len(EXPENSE_CATEGORIES) else None
+
+    inc_match = re.fullmatch(r"inc_(\d+)", slug or "")
+    if inc_match:
+        idx = int(inc_match.group(1))
+        return INCOME_CATEGORIES[idx] if 0 <= idx < len(INCOME_CATEGORIES) else None
+
+    return None
+
+
+def _build_category_keyboard(doc_id: str, tx_type: int) -> dict:
+    categories = INCOME_CATEGORIES if tx_type == 1 else EXPENSE_CATEGORIES
+    rows = []
+    for category in categories:
+        slug = encode_category_slug(category)
+        if not slug:
+            continue
+        icon = CATEGORY_EMOJIS.get(category, "")
+        text = f"{icon} {category}".strip()
+        rows.append([{"text": text, "callback_data": f"set_cat:{doc_id}:{slug}"}])
+    return {"inline_keyboard": rows}
+
+
 def _answer_telegram_callback(bot_token: str, callback_query_id: str, text: Optional[str] = None):
     url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
     payload = {"callback_query_id": callback_query_id}
@@ -436,6 +471,53 @@ def _answer_telegram_callback(bot_token: str, callback_query_id: str, text: Opti
 
 
 def _handle_transaction_callback(bot_token: str, firebase_uid: str, chat_id: int, callback_query_id: str, callback_data: str):
+    if callback_data.startswith("set_cat:"):
+        parts = callback_data.split(":", 2)
+        if len(parts) != 3:
+            _answer_telegram_callback(bot_token, callback_query_id, "Thao tác không hợp lệ.")
+            return
+
+        _, doc_id, category_slug = parts
+        if not _is_safe_transaction_doc_id(doc_id):
+            _answer_telegram_callback(bot_token, callback_query_id, "Giao dịch không hợp lệ.")
+            return
+
+        tx_ref = db.collection("users").document(firebase_uid).collection("transactions").document(doc_id)
+        tx_snap = tx_ref.get()
+        if not tx_snap.exists:
+            _answer_telegram_callback(bot_token, callback_query_id, "Không tìm thấy giao dịch.")
+            send_telegram_message(bot_token, chat_id, f"⚠️ Không tìm thấy giao dịch {doc_id}.")
+            return
+
+        tx_data = tx_snap.to_dict() or {}
+        if tx_data.get("isDeleted") is True:
+            _answer_telegram_callback(bot_token, callback_query_id, "Giao dịch đã được xóa trước đó.")
+            send_telegram_message(bot_token, chat_id, f"ℹ️ Giao dịch {doc_id} đã được xóa trước đó.")
+            return
+
+        new_category = decode_category_slug(category_slug)
+        tx_type = 1 if tx_data.get("type") == 1 else 0
+        valid_categories = INCOME_CATEGORIES if tx_type == 1 else EXPENSE_CATEGORIES
+        if not new_category or new_category not in valid_categories:
+            _answer_telegram_callback(bot_token, callback_query_id, "Danh mục không hợp lệ.")
+            return
+
+        try:
+            tx_ref.update({
+                "category": new_category,
+                "lastUpdated": firestore.SERVER_TIMESTAMP,
+            })
+        except Exception as e:
+            print(f"[Telegram Category Update Error] {e}")
+            traceback.print_exc()
+            _answer_telegram_callback(bot_token, callback_query_id, "Không thể cập nhật danh mục.")
+            send_telegram_message(bot_token, chat_id, "⚠️ Không thể cập nhật danh mục lúc này. Vui lòng thử lại sau.")
+            return
+
+        _answer_telegram_callback(bot_token, callback_query_id, "Đã cập nhật danh mục.")
+        send_telegram_message(bot_token, chat_id, f"✅ Đã cập nhật danh mục giao dịch {doc_id} thành: {new_category}")
+        return
+
     try:
         action, doc_id = callback_data.split(":", 1)
     except ValueError:
@@ -452,8 +534,27 @@ def _handle_transaction_callback(bot_token: str, firebase_uid: str, chat_id: int
         return
 
     if action == "edit_category":
-        _answer_telegram_callback(bot_token, callback_query_id, "Sửa danh mục chưa hỗ trợ trên Telegram.")
-        send_telegram_message(bot_token, chat_id, "🏷️ Tính năng sửa danh mục trên Telegram sẽ được bổ sung sau. Bạn có thể sửa trong app Sổ Thu Chi.")
+        tx_ref = db.collection("users").document(firebase_uid).collection("transactions").document(doc_id)
+        tx_snap = tx_ref.get()
+        if not tx_snap.exists:
+            _answer_telegram_callback(bot_token, callback_query_id, "Không tìm thấy giao dịch.")
+            send_telegram_message(bot_token, chat_id, f"⚠️ Không tìm thấy giao dịch {doc_id}.")
+            return
+
+        tx_data = tx_snap.to_dict() or {}
+        if tx_data.get("isDeleted") is True:
+            _answer_telegram_callback(bot_token, callback_query_id, "Giao dịch đã được xóa trước đó.")
+            send_telegram_message(bot_token, chat_id, f"ℹ️ Giao dịch {doc_id} đã được xóa trước đó.")
+            return
+
+        tx_type = 1 if tx_data.get("type") == 1 else 0
+        _answer_telegram_callback(bot_token, callback_query_id, "Chọn danh mục mới.")
+        send_telegram_message(
+            bot_token,
+            chat_id,
+            f"🏷️ Chọn danh mục mới cho giao dịch {doc_id}:",
+            reply_markup=_build_category_keyboard(doc_id, tx_type)
+        )
         return
 
     tx_ref = db.collection("users").document(firebase_uid).collection("transactions").document(doc_id)

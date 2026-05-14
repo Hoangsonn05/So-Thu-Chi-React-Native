@@ -320,6 +320,15 @@ class DatabaseHelper {
     await db.runAsync(`DELETE FROM ${TABLE_TRANSACTIONS}`);
   }
 
+  async deleteTransactionByDocId(docId: string): Promise<void> {
+    const db = await this.open();
+    const result = await db.runAsync(
+      `DELETE FROM ${TABLE_TRANSACTIONS} WHERE ${COLUMN_DOC_ID} = ?`,
+      [docId]
+    );
+    console.log(`[DatabaseHelper] Soft-deleted cloud doc removed from local UI cache: ${docId}, rows=${result.changes ?? 0}`);
+  }
+
   /**
    * Xóa toàn bộ dữ liệu (cả giao dịch và user)
    * Dùng khi đăng xuất
