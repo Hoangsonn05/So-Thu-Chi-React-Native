@@ -55,6 +55,20 @@ QUY TẮC:
 3. Nếu gọi `schedule_report` hoặc `set_budget_alert`, hãy xác nhận với người dùng rằng thông tin đã được lưu thành công.
 """
 
+AGENTIC_SYSTEM_PROMPT += """
+
+ADDITIONAL FINANCIAL QUERY TOOLS:
+- Use `top_transactions` for largest transactions / top spending / top income.
+- Use `merchant_spending` for spending at a merchant, store, brand, wallet, or payee, for example Highlands, Shopee, Grab.
+- Use `compare_periods` for comparison questions such as "so voi thang truoc", "so voi tuan truoc".
+- Use `category_trend` for questions about which category increased/decreased strongly.
+
+Supported timeframes: today, current_week, last_week, current_month, last_month, all_time.
+All totals, aggregates, rankings, comparisons, and percentages MUST be computed by Python tools from Firestore data before you answer.
+You may only explain the returned tool result. Do not calculate or invent financial numbers yourself.
+"""
+
+
 def execute_set_budget_alert(firebase_uid: str, category: str, budget_amount: float, threshold_pct: float) -> str:
     """ Lưu cấu hình ngân sách vào Firestore. """
     db = firestore.client()
@@ -115,17 +129,7 @@ def execute_query_database(firebase_uid: str, category: str, timeframe: str) -> 
     """
     db = firestore.client()
     try:
-        now = datetime.now(tz=VN_TZ)
-        end_date = now
-        
-        if timeframe == "current_month":
-            start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        elif timeframe == "last_week":
-            start_date = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        elif timeframe == "today":
-            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        else: # all_time
-            start_date = now.replace(year=2000, month=1, day=1)
+        start_date, end_date = _get_period_bounds(timeframe)
 
         start_utc = start_date.astimezone(timezone.utc)
         end_utc = end_date.astimezone(timezone.utc)
@@ -194,6 +198,241 @@ def execute_query_database(firebase_uid: str, category: str, timeframe: str) -> 
         return json.dumps({"error": str(e)})
 
 
+def _get_period_bounds(timeframe: str) -> tuple[datetime, datetime]:
+    now = datetime.now(tz=VN_TZ)
+    key = (timeframe or "current_month").strip().lower()
+
+    if key == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = now
+    elif key == "current_week":
+        start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = now
+    elif key == "last_week":
+        this_week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        start = this_week_start - timedelta(days=7)
+        end = this_week_start - timedelta(microseconds=1)
+    elif key == "last_month":
+        first_current = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        last_prev = first_current - timedelta(microseconds=1)
+        start = last_prev.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end = last_prev
+    elif key == "all_time":
+        start = now.replace(year=2000, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        end = now
+    else:
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end = now
+
+    return start, end
+
+
+def _format_period(start: datetime, end: datetime) -> str:
+    return f"{start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')}"
+
+
+def _fetch_transactions_for_period(firebase_uid: str, timeframe: str) -> tuple[list[dict], datetime, datetime]:
+    db = firestore.client()
+    start_vn, end_vn = _get_period_bounds(timeframe)
+    start_utc = start_vn.astimezone(timezone.utc)
+    end_utc = end_vn.astimezone(timezone.utc)
+
+    query = db.collection("users").document(firebase_uid).collection("transactions")
+    query = query.where(filter=FieldFilter("timestamp", ">=", start_utc)).where(filter=FieldFilter("timestamp", "<=", end_utc))
+
+    transactions = []
+    for doc in query.stream():
+        data = doc.to_dict() or {}
+        if data.get("isDeleted", False):
+            continue
+
+        try:
+            amount = float(data.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            amount = 0
+
+        transactions.append({
+            "id": doc.id,
+            "amount": amount,
+            "type": 1 if data.get("type") == 1 else 0,
+            "category": str(data.get("category", "Khac")),
+            "note": str(data.get("note", "")),
+            "source": str(data.get("source", "")),
+            "date": str(data.get("date", "")),
+        })
+
+    return transactions, start_vn, end_vn
+
+
+def _category_matches(actual: str, requested: str) -> bool:
+    requested = (requested or "").strip().lower()
+    if requested in {"", "all", "tat ca", "tong", "tong cong", "tất cả"}:
+        return True
+    return (actual or "").strip().lower() == requested
+
+
+def _sum_metric(transactions: list[dict], metric: str, category: str = "all") -> float:
+    metric_key = (metric or "expense").strip().lower()
+    total_income = 0.0
+    total_expense = 0.0
+    for tx in transactions:
+        if not _category_matches(tx.get("category", ""), category):
+            continue
+        if tx.get("type") == 1:
+            total_income += tx.get("amount", 0)
+        else:
+            total_expense += tx.get("amount", 0)
+
+    if metric_key in {"income", "thu", "thu_nhap"}:
+        return total_income
+    if metric_key in {"net", "balance", "chenh_lech"}:
+        return total_income - total_expense
+    return total_expense
+
+
+def execute_compare_periods(firebase_uid: str, metric: str, current_period: str, compare_period: str, category: str = "all") -> str:
+    try:
+        current_txs, current_start, current_end = _fetch_transactions_for_period(firebase_uid, current_period)
+        previous_txs, previous_start, previous_end = _fetch_transactions_for_period(firebase_uid, compare_period)
+
+        current_value = _sum_metric(current_txs, metric, category)
+        previous_value = _sum_metric(previous_txs, metric, category)
+        diff = current_value - previous_value
+        percent_change = None if previous_value == 0 else (diff / previous_value) * 100
+
+        result = {
+            "tool": "compare_periods",
+            "metric": metric or "expense",
+            "category": category or "all",
+            "current_period": current_period,
+            "current_period_range": _format_period(current_start, current_end),
+            "current_value": current_value,
+            "current_transaction_count": len(current_txs),
+            "compare_period": compare_period,
+            "compare_period_range": _format_period(previous_start, previous_end),
+            "previous_value": previous_value,
+            "previous_transaction_count": len(previous_txs),
+            "difference": diff,
+            "percent_change": percent_change,
+            "percent_change_note": "N/A because previous_value is 0" if previous_value == 0 else None,
+        }
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({"error": str(e)})
+
+
+def execute_top_transactions(firebase_uid: str, timeframe: str, transaction_type: str = "expense", limit: int = 5, category: str = "all") -> str:
+    try:
+        safe_limit = max(1, min(int(limit or 5), 10))
+        txs, start, end = _fetch_transactions_for_period(firebase_uid, timeframe)
+
+        type_key = (transaction_type or "expense").strip().lower()
+        expected_type = 1 if type_key in {"income", "thu", "thu_nhap"} else 0
+        filtered = [
+            tx for tx in txs
+            if tx.get("type") == expected_type and _category_matches(tx.get("category", ""), category)
+        ]
+        filtered.sort(key=lambda tx: tx.get("amount", 0), reverse=True)
+
+        result = {
+            "tool": "top_transactions",
+            "timeframe": timeframe,
+            "period_range": _format_period(start, end),
+            "transaction_type": transaction_type or "expense",
+            "category": category or "all",
+            "limit": safe_limit,
+            "matched_count": len(filtered),
+            "top_transactions": filtered[:safe_limit],
+        }
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({"error": str(e)})
+
+
+def execute_merchant_spending(firebase_uid: str, merchant: str, timeframe: str) -> str:
+    try:
+        merchant_key = (merchant or "").strip().lower()
+        txs, start, end = _fetch_transactions_for_period(firebase_uid, timeframe)
+        matched = []
+
+        for tx in txs:
+            if tx.get("type") != 0:
+                continue
+            haystack = f"{tx.get('source', '')} {tx.get('note', '')}".lower()
+            if merchant_key and merchant_key in haystack:
+                matched.append(tx)
+
+        total_spent = sum(tx.get("amount", 0) for tx in matched)
+        matched.sort(key=lambda tx: tx.get("amount", 0), reverse=True)
+
+        result = {
+            "tool": "merchant_spending",
+            "merchant": merchant,
+            "timeframe": timeframe,
+            "period_range": _format_period(start, end),
+            "total_spent": total_spent,
+            "matched_count": len(matched),
+            "matched_examples": matched[:5],
+        }
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({"error": str(e)})
+
+
+def execute_category_trend(firebase_uid: str, current_period: str, compare_period: str, limit: int = 5) -> str:
+    try:
+        safe_limit = max(1, min(int(limit or 5), 10))
+        current_txs, current_start, current_end = _fetch_transactions_for_period(firebase_uid, current_period)
+        previous_txs, previous_start, previous_end = _fetch_transactions_for_period(firebase_uid, compare_period)
+
+        def group_expenses(transactions: list[dict]) -> dict[str, float]:
+            grouped = {}
+            for tx in transactions:
+                if tx.get("type") != 0:
+                    continue
+                cat = tx.get("category", "Khac")
+                grouped[cat] = grouped.get(cat, 0.0) + tx.get("amount", 0)
+            return grouped
+
+        current_by_cat = group_expenses(current_txs)
+        previous_by_cat = group_expenses(previous_txs)
+        all_categories = sorted(set(current_by_cat) | set(previous_by_cat))
+
+        trends = []
+        for cat in all_categories:
+            current_value = current_by_cat.get(cat, 0.0)
+            previous_value = previous_by_cat.get(cat, 0.0)
+            diff = current_value - previous_value
+            percent_change = None if previous_value == 0 else (diff / previous_value) * 100
+            trends.append({
+                "category": cat,
+                "current_value": current_value,
+                "previous_value": previous_value,
+                "difference": diff,
+                "percent_change": percent_change,
+                "percent_change_note": "N/A because previous_value is 0" if previous_value == 0 else None,
+            })
+
+        trends.sort(key=lambda item: item["difference"], reverse=True)
+        result = {
+            "tool": "category_trend",
+            "current_period": current_period,
+            "current_period_range": _format_period(current_start, current_end),
+            "compare_period": compare_period,
+            "compare_period_range": _format_period(previous_start, previous_end),
+            "limit": safe_limit,
+            "top_increases": trends[:safe_limit],
+            "top_decreases": sorted(trends, key=lambda item: item["difference"])[:safe_limit],
+        }
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({"error": str(e)})
+
+
 def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
     """
     Gọi OpenRouter với Function Calling để giải đáp truy vấn.
@@ -208,7 +447,7 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                     "type": "object",
                     "properties": {
                         "category": { "type": "string", "description": "Danh mục (ví dụ: 'Ăn uống', 'Tất cả', 'Chi tiêu', 'Thu nhập')" },
-                        "timeframe": { "type": "string", "description": "Khoảng thời gian: 'current_month', 'last_week', 'today', 'all_time'" }
+                        "timeframe": { "type": "string", "description": "Khoảng thời gian: 'today', 'current_week', 'last_week', 'current_month', 'last_month', 'all_time'" }
                     },
                     "required": ["category", "timeframe"]
                 }
@@ -226,6 +465,71 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                         "report_type": { "type": "string", "description": "Loại báo cáo cần gửi (ví dụ: 'weekly_summary', 'daily_summary')" }
                     },
                     "required": ["target_datetime", "report_type"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "compare_periods",
+                "description": "Compare computed financial totals between two periods. Python computes all totals and percentage changes from Firestore.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "metric": { "type": "string", "description": "Metric to compare: expense, income, or net. Default expense." },
+                        "current_period": { "type": "string", "description": "today, current_week, last_week, current_month, last_month, all_time" },
+                        "compare_period": { "type": "string", "description": "today, current_week, last_week, current_month, last_month, all_time" },
+                        "category": { "type": "string", "description": "Optional category, or all." }
+                    },
+                    "required": ["metric", "current_period", "compare_period"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "top_transactions",
+                "description": "Return the largest transactions in a period. Default limit is 5, maximum is 10.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "timeframe": { "type": "string", "description": "today, current_week, last_week, current_month, last_month, all_time" },
+                        "transaction_type": { "type": "string", "description": "expense or income. Default expense." },
+                        "limit": { "type": "integer", "description": "Number of transactions. Default 5, max 10." },
+                        "category": { "type": "string", "description": "Optional category, or all." }
+                    },
+                    "required": ["timeframe"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "merchant_spending",
+                "description": "Compute spending at a merchant/store/brand/payee by matching source and note. Returns matched_count and examples.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "merchant": { "type": "string", "description": "Merchant, store, brand, wallet, or payee name, e.g. Highlands." },
+                        "timeframe": { "type": "string", "description": "today, current_week, last_week, current_month, last_month, all_time" }
+                    },
+                    "required": ["merchant", "timeframe"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "category_trend",
+                "description": "Compare category spending between two periods and return strongest increases/decreases.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "current_period": { "type": "string", "description": "today, current_week, last_week, current_month, last_month, all_time" },
+                        "compare_period": { "type": "string", "description": "today, current_week, last_week, current_month, last_month, all_time" },
+                        "limit": { "type": "integer", "description": "Number of categories. Default 5, max 10." }
+                    },
+                    "required": ["current_period", "compare_period"]
                 }
             }
         },
@@ -291,6 +595,35 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                     firebase_uid=firebase_uid,
                     target_datetime_iso=arguments.get("target_datetime"),
                     report_type=arguments.get("report_type", "summary")
+                )
+            elif function_name == "compare_periods":
+                db_result = execute_compare_periods(
+                    firebase_uid=firebase_uid,
+                    metric=arguments.get("metric", "expense"),
+                    current_period=arguments.get("current_period", "current_month"),
+                    compare_period=arguments.get("compare_period", "last_month"),
+                    category=arguments.get("category", "all")
+                )
+            elif function_name == "top_transactions":
+                db_result = execute_top_transactions(
+                    firebase_uid=firebase_uid,
+                    timeframe=arguments.get("timeframe", "current_month"),
+                    transaction_type=arguments.get("transaction_type", "expense"),
+                    limit=arguments.get("limit", 5),
+                    category=arguments.get("category", "all")
+                )
+            elif function_name == "merchant_spending":
+                db_result = execute_merchant_spending(
+                    firebase_uid=firebase_uid,
+                    merchant=arguments.get("merchant", ""),
+                    timeframe=arguments.get("timeframe", "current_month")
+                )
+            elif function_name == "category_trend":
+                db_result = execute_category_trend(
+                    firebase_uid=firebase_uid,
+                    current_period=arguments.get("current_period", "current_month"),
+                    compare_period=arguments.get("compare_period", "last_month"),
+                    limit=arguments.get("limit", 5)
                 )
             elif function_name == "set_budget_alert":
                 db_result = execute_set_budget_alert(
@@ -556,4 +889,3 @@ def check_budget_thresholds(firebase_uid: str, category: str, new_amount: float)
     except Exception as e:
         print(f"[Budget Check Error] {e}")
         traceback.print_exc()
-
