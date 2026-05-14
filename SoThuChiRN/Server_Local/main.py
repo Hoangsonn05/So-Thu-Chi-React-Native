@@ -38,7 +38,7 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b:free"
 
 # Multi transaction parsing is high-risk; keep disabled by default.
-ENABLE_MULTI_TRANSACTION_PARSE = False
+ENABLE_MULTI_TRANSACTION_PARSE = os.getenv("ENABLE_MULTI_TRANSACTION_PARSE", "false").strip().lower() in {"1", "true", "yes", "on"}
 MAX_MULTI_TRANSACTIONS = 5
 
 # --- TIMEZONE Việt Nam (UTC+7) ---
@@ -856,6 +856,12 @@ def analyze_text_multi_transactions(user_text: str) -> list[dict]:
 3. If the user's message contains only one transaction, still output an array with exactly one item.
 4. Split clearly separate spending/income entries into separate array items.
 5. Do not invent transactions that are not present in the user's text.
+6. If a message contains multiple clauses separated by commas, semicolons, "va", "và",
+   or separate time markers such as "sang", "sáng", "trua", "trưa", "toi", "tối",
+   and each clause has its own amount, each clause MUST become a separate JSON object.
+7. The input "Sáng cafe 25k, trưa ăn cơm gà 35k, gửi xe 3k" MUST be split into
+   exactly 3 JSON objects with amounts 25000, 35000, and 3000. Never combine it
+   into one 63000 transaction.
 """
 
     full_prompt = f"{multi_prompt}\n\nUSER INPUT: \"{user_text}\"\n\nJSON ARRAY OUTPUT:"
@@ -1175,7 +1181,7 @@ def _process_ai_and_save_multi(bot_token: Optional[str], firebase_uid: str, chat
     try:
         parsed_items = analyze_text_multi_transactions(text)
     except Exception as multi_err:
-        print(f"[AI Multi Fallback] Multi parse failed, falling back to legacy analyzer: {multi_err}")
+        print(f"[MULTI_PARSE] fallback legacy reason: {multi_err}")
         parsed_items = [analyze_text_with_gemini(text)]
 
     if parsed_items == "ERROR_TIMEOUT" or any(item == "ERROR_TIMEOUT" for item in parsed_items):
@@ -1183,6 +1189,8 @@ def _process_ai_and_save_multi(bot_token: Optional[str], firebase_uid: str, chat
         if bot_token and chat_id:
             send_telegram_message(bot_token, chat_id, overload_msg)
         return
+
+    print(f"[MULTI_PARSE] item count: {len(parsed_items)}")
 
     if len(parsed_items) > MAX_MULTI_TRANSACTIONS:
         omitted_count = len(parsed_items) - MAX_MULTI_TRANSACTIONS
@@ -1236,12 +1244,15 @@ def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Op
     """
     try:
         print(f"[Process] chat_id={chat_id}, uid={firebase_uid}, text='{text[:50]}'")
+        print(f"[MULTI_PARSE] enabled={ENABLE_MULTI_TRANSACTION_PARSE}")
 
         # 2. Gọi AI — NGOÀI transaction
         if ENABLE_MULTI_TRANSACTION_PARSE:
+            print("[MULTI_PARSE] using multi flow")
             _process_ai_and_save_multi(bot_token, firebase_uid, chat_id, text, is_auto_detect)
             return
 
+        print("[MULTI_PARSE] using legacy flow")
         parsed = analyze_text_with_gemini(text)
         
         if parsed == "ERROR_TIMEOUT":
