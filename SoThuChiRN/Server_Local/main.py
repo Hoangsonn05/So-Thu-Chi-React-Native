@@ -155,13 +155,16 @@ app = FastAPI(title="Firestore Export & Telegram Bot API", lifespan=lifespan)
 
 def process_agentic_query(bot_token: str, firebase_uid: str, chat_id: int, text: str):
     """ Xử lý Agentic AI Workflow cho các câu truy vấn báo cáo tài chính """
-    from agentic_ai import chat_with_agentic_ai, send_manual_report
+    from agentic_ai import chat_with_agentic_ai, handle_manual_external_report_request, send_manual_report, EXTERNAL_BRIEF_TASK_TYPES
     try:
         print(f"[Agentic] Bắt đầu xử lý truy vấn cho UID: {firebase_uid}")
         manual_task_type = _detect_manual_report_task_type(text)
         if manual_task_type:
             print(f"[Agentic] Manual report task detected: uid={firebase_uid}, task={manual_task_type}")
-            send_manual_report(firebase_uid, manual_task_type)
+            if manual_task_type in EXTERNAL_BRIEF_TASK_TYPES:
+                handle_manual_external_report_request(firebase_uid, manual_task_type, source="telegram")
+            else:
+                send_manual_report(firebase_uid, manual_task_type)
             return
         reply = chat_with_agentic_ai(text, firebase_uid)
         if reply:
@@ -192,6 +195,39 @@ def _detect_manual_report_task_type(text: str) -> Optional[str]:
     if wants_report and any(k in lower_text for k in ["tháng", "thang", "monthly"]):
         return "monthly_finance_report"
     if wants_report and any(k in lower_text for k in ["hôm nay", "hom nay", "ngày", "ngay", "daily", "chi tiêu", "chi tieu", "tài chính", "tai chinh"]):
+        return "daily_finance_report"
+    return None
+
+
+def _normalize_intent_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text or "")
+    without_accents = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+    return re.sub(r"\s+", " ", without_accents.lower()).strip()
+
+
+def _detect_manual_report_task_type(text: str) -> Optional[str]:
+    lower_text = _normalize_intent_text(text)
+    if not lower_text:
+        return None
+    wants_report = any(k in lower_text for k in ["bao cao", "ban tin", "tom tat", "brief"])
+    if any(k in lower_text for k in ["gia vang", "vang hom nay", "sjc", "pnj"]):
+        return "gold_price_brief"
+    if any(k in lower_text for k in ["gia xang", "xang dau"]):
+        return "fuel_price_brief"
+    if any(k in lower_text for k in ["gia ai", "goi ai"]) or (
+        wants_report and any(k in lower_text for k in ["gpt", "openai", "chatgpt", "gemini", "deepseek"])
+    ):
+        return "ai_price_brief"
+    if wants_report and any(k in lower_text for k in [
+        "bao cao sang", "sang nay", "morning", "morning brief",
+        "du lieu ngoai", "tai chinh ngoai", "thi truong",
+    ]):
+        return "morning_external_brief"
+    if wants_report and any(k in lower_text for k in ["tuan", "weekly"]):
+        return "weekly_finance_report"
+    if wants_report and any(k in lower_text for k in ["thang", "monthly"]):
+        return "monthly_finance_report"
+    if wants_report and any(k in lower_text for k in ["hom nay", "ngay", "daily", "chi tieu", "tai chinh"]):
         return "daily_finance_report"
     return None
 
@@ -2095,12 +2131,15 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
             send_telegram_message(bot_token, chat_id, waiting_msg)
             
             # Phân tích cơ bản để xem người dùng đang "ghi chép" hay "hỏi đáp/báo cáo"
-            lower_text = text.lower()
-            is_query = any(keyword in lower_text for keyword in [
-                "?", "báo cáo", "bao cao", "bản tin", "ban tin", "tổng", "bao nhiêu",
+            lower_text = _normalize_intent_text(text)
+            manual_report_type = _detect_manual_report_task_type(text)
+            is_query = manual_report_type is not None or any(keyword in lower_text for keyword in [
+                "?", "bao cao", "ban tin", "tong", "bao nhieu", "thong ke", "dat", "han muc", "ngan sach", "gioi han",
+                "báo cáo", "bản tin", "tổng", "bao nhiêu",
                 "thống kê", "đặt", "hạn mức", "ngân sách", "giới hạn", "giá vàng",
                 "gia vang", "giá xăng", "gia xang", "xăng dầu", "xang dau", "openai",
-                "chatgpt", "claude", "gemini"
+                "chatgpt", "claude", "gemini", "deepseek", "gpt", "sjc", "pnj",
+                "gia ai", "goi ai", "morning brief", "tai chinh ngoai", "du lieu ngoai", "thi truong"
             ])
             
             if is_query:
