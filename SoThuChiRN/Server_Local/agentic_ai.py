@@ -43,6 +43,12 @@ EXTERNAL_BRIEF_TITLES = {
 }
 EXTERNAL_BRIEF_FALLBACK_MESSAGE = "Tính năng đang có khung xử lý, nguồn dữ liệu chưa cấu hình."
 DEFAULT_EXTERNAL_BRIEF_TASK_TYPE = "morning_external_brief"
+FINANCE_REPORT_TITLES = {
+    "daily_finance_report": "Bao cao tai chinh hom nay",
+    "expense_report": "Bao cao chi tieu",
+    "weekly_finance_report": "Bao cao tai chinh tuan nay",
+    "monthly_finance_report": "Bao cao tai chinh thang nay",
+}
 FINANCE_REPORT_TASK_TYPES = {
     "expense_report",
     "daily_finance_report",
@@ -123,6 +129,11 @@ TELEGRAM RESPONSE STYLE:
 - Format VND amounts with dot separators, for example 57.948.200đ.
 - Do not use raw markdown bullets like "- **...".
 - If evidence is missing, say the data is not available instead of guessing.
+
+FINANCE REPORT SCHEDULING:
+- For "len lich bao cao tai chinh luc 21h moi ngay", call schedule_report with schedule_type=daily, time=21:00, report_type=daily_finance_report, timeframe=today.
+- For expense-only wording, use report_type=expense_report.
+- For weekly/monthly wording, use schedule_type=weekly/monthly and timeframe=current_week/current_month.
 """
 
 
@@ -323,11 +334,177 @@ def mark_manual_report_delivery(uid: str, task_type: str, scheduled_time: str, s
         last_report_id=None,
     )
 
-def execute_schedule_report(firebase_uid: str, target_datetime_iso: str, report_type: str) -> str:
+
+def _normalize_schedule_type(value: Optional[str], report_type: str = "daily_finance_report") -> str:
+    key = (value or "").strip().lower()
+    if key in {"daily", "weekly", "monthly", "once"}:
+        return key
+    task_type = _task_type_from_legacy({"report_type": report_type})
+    if task_type == "weekly_finance_report":
+        return "weekly"
+    if task_type == "monthly_finance_report":
+        return "monthly"
+    return "daily"
+
+
+def _normalize_timeframe(value: Optional[str], schedule_type: str = "daily", task_type: str = "daily_finance_report") -> str:
+    key = (value or "").strip().lower()
+    if key in {"today", "current_week", "current_month", "last_week", "last_month", "all_time"}:
+        return key
+    if schedule_type == "weekly" or task_type == "weekly_finance_report":
+        return "current_week"
+    if schedule_type == "monthly" or task_type == "monthly_finance_report":
+        return "current_month"
+    return "today"
+
+
+def _parse_user_time(value: Optional[str], fallback: str = DEFAULT_FINANCE_SEND_TIME) -> str:
+    text = (value or fallback).strip().lower()
+    text = text.replace("h", ":")
+    if text.endswith(":"):
+        text += "00"
+    match = re.search(r"\b([01]?\d|2[0-3])(?::([0-5]\d))?\b", text)
+    if not match:
+        return fallback
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _finance_default_task_ref(db, uid: str):
+    return db.collection("scheduled_tasks").document(_default_task_id(uid, DEFAULT_DAILY_FINANCE_TASK_TYPE))
+
+
+def disable_default_finance_report_task_for_user(uid: str) -> None:
+    db = firestore.client()
+    _finance_default_task_ref(db, uid).set({
+        "status": "disabled",
+        "disabled_reason": "custom_finance_report_active",
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }, merge=True)
+
+
+def ensure_default_finance_report_task_for_user(uid: str) -> None:
+    db = firestore.client()
+    if _user_has_custom_finance_task(db, uid):
+        disable_default_finance_report_task_for_user(uid)
+        return
+    _create_default_task_if_missing(db, uid, DEFAULT_DAILY_FINANCE_TASK_TYPE, DEFAULT_FINANCE_SEND_TIME)
+
+
+def _disable_active_custom_finance_tasks(uid: str) -> int:
+    db = firestore.client()
+    count = 0
+    for snap in db.collection("scheduled_tasks").where(filter=FieldFilter("uid", "==", uid)).stream():
+        task = snap.to_dict() or {}
+        if task.get("status") not in TASK_ACTIVE_STATUSES:
+            continue
+        if task.get("schedule_type") == "default_daily":
+            continue
+        if _task_type_from_legacy(task) not in FINANCE_REPORT_TASK_TYPES:
+            continue
+        snap.reference.set({
+            "status": "disabled",
+            "disabled_at": firestore.SERVER_TIMESTAMP,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        count += 1
+    ensure_default_finance_report_task_for_user(uid)
+    return count
+
+
+def list_finance_report_tasks(uid: str) -> str:
+    db = firestore.client()
+    rows = []
+    for snap in db.collection("scheduled_tasks").where(filter=FieldFilter("uid", "==", uid)).stream():
+        task = snap.to_dict() or {}
+        task_type = _task_type_from_legacy(task)
+        if task_type not in FINANCE_REPORT_TASK_TYPES:
+            continue
+        if task.get("status") not in TASK_ACTIVE_STATUSES:
+            continue
+        rows.append({
+            "id": snap.id,
+            "task_type": task_type,
+            "schedule_type": task.get("schedule_type"),
+            "time": task.get("time"),
+            "timezone": task.get("timezone") or DEFAULT_TIMEZONE,
+            "timeframe": (task.get("payload") or {}).get("timeframe") or _timeframe_for_task_type(task_type),
+        })
+    if not rows:
+        return "Chua co lich bao cao tai chinh dang bat."
+    lines = ["Lich bao cao tai chinh dang bat:"]
+    for item in sorted(rows, key=lambda row: (row["schedule_type"] or "", row["time"] or "")):
+        lines.append(f"- {item['task_type']} {item['schedule_type']} luc {item['time']} ({item['timezone']}), timeframe={item['timeframe']}")
+    return "\n".join(lines)
+
+
+def stop_custom_finance_reports(uid: str) -> str:
+    count = _disable_active_custom_finance_tasks(uid)
+    if count:
+        return f"Da huy {count} lich bao cao tai chinh rieng. Default 20:00 da duoc bat lai neu ban con Telegram/FCM."
+    ensure_default_finance_report_task_for_user(uid)
+    return "Khong co lich rieng dang bat. Default bao cao cuoi ngay 20:00 van duoc duy tri."
+
+
+def create_custom_finance_report_task(uid: str, user_time: str, schedule_type: str = "daily", report_type: str = "daily_finance_report", timeframe: str = "today") -> str:
+    db = firestore.client()
+    task_type = _task_type_from_legacy({"report_type": report_type})
+    if task_type not in {"daily_finance_report", "expense_report", "weekly_finance_report", "monthly_finance_report"}:
+        task_type = "daily_finance_report"
+    normalized_schedule = _normalize_schedule_type(schedule_type, task_type)
+    normalized_time = _parse_user_time(user_time, DEFAULT_FINANCE_SEND_TIME)
+    normalized_timeframe = _normalize_timeframe(timeframe, normalized_schedule, task_type)
+    now_utc = datetime.now(timezone.utc)
+    task = {
+        "uid": uid,
+        "task_type": task_type,
+        "schedule_type": normalized_schedule,
+        "status": "active",
+        "timezone": DEFAULT_TIMEZONE,
+        "time": normalized_time,
+        "last_run_at": None,
+        "last_success_at": None,
+        "retry_count": 0,
+        "payload": {
+            "timeframe": normalized_timeframe,
+            "created_by_user": True,
+            "delivery": ["telegram", "fcm"],
+        },
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    if task_type == DEFAULT_DAILY_FINANCE_TASK_TYPE:
+        task["payload"] = {
+            "timeframe": "today",
+            "delivery": ["telegram", "fcm"],
+            "skip_default_if_manual_before_scheduled": False,
+        }
+    task["next_run_at"] = calculate_next_run_at(task, now_utc)
+    doc_id = f"{uid}_{task_type}_{normalized_schedule}_{normalized_time.replace(':', '')}_custom"
+    db.collection("scheduled_tasks").document(doc_id).set(task, merge=True)
+    disable_default_finance_report_task_for_user(uid)
+    return json.dumps({
+        "status": "success",
+        "message": f"Da len lich {task_type} {normalized_schedule} luc {normalized_time}.",
+        "task_id": doc_id,
+        "timeframe": normalized_timeframe,
+    }, ensure_ascii=False)
+
+
+def execute_schedule_report(firebase_uid: str, target_datetime_iso: Optional[str] = None, report_type: str = "daily_finance_report", schedule_type: Optional[str] = None, time: Optional[str] = None, frequency: Optional[str] = None, timeframe: Optional[str] = None) -> str:
     """ Lưu lịch báo cáo vào Firestore collection 'scheduled_tasks'. """
     db = firestore.client()
     try:
-        print(f"[Execute Tool] schedule_report: target={target_datetime_iso}, type={report_type}")
+        print(f"[Execute Tool] schedule_report: target={target_datetime_iso}, type={report_type}, schedule={schedule_type}, time={time}, timeframe={timeframe}")
+        if time or schedule_type or frequency or timeframe or not target_datetime_iso:
+            return create_custom_finance_report_task(
+                firebase_uid,
+                user_time=time or DEFAULT_FINANCE_SEND_TIME,
+                schedule_type=schedule_type or frequency or "daily",
+                report_type=report_type or "daily_finance_report",
+                timeframe=timeframe or None,
+            )
         # Nhận ISO string, chuyển thành datetime object chuẩn (đã có múi giờ hoặc gán UTC+7)
         # Python 3.7+ hỗ trợ fromisoformat với múi giờ (+07:00)
         dt_str = target_datetime_iso.replace('Z', '+00:00')
@@ -519,6 +696,131 @@ def _fetch_transactions_for_period(firebase_uid: str, timeframe: str) -> tuple[l
         })
 
     return transactions, start_vn, end_vn
+
+
+def _format_vnd(amount: float) -> str:
+    return f"{int(round(amount)):,.0f}".replace(",", ".") + "d"
+
+
+def _build_finance_report_data(uid: str, timeframe: str) -> dict:
+    txs, start, end = _fetch_transactions_for_period(uid, timeframe)
+    total_income = sum(tx.get("amount", 0) for tx in txs if tx.get("type") == 1)
+    total_expense = sum(tx.get("amount", 0) for tx in txs if tx.get("type") == 0)
+    by_category: dict[str, float] = {}
+    expense_txs = []
+    for tx in txs:
+        if tx.get("type") != 0:
+            continue
+        category = tx.get("category") or "Khac"
+        by_category[category] = by_category.get(category, 0.0) + tx.get("amount", 0)
+        expense_txs.append(tx)
+
+    top_categories = sorted(
+        [{"category": key, "amount": value} for key, value in by_category.items()],
+        key=lambda item: item["amount"],
+        reverse=True,
+    )[:3]
+    top_expenses = sorted(expense_txs, key=lambda tx: tx.get("amount", 0), reverse=True)[:3]
+    return {
+        "uid": uid,
+        "timeframe": timeframe,
+        "period": _format_period(start, end),
+        "date_key": get_date_key(end, DEFAULT_TIMEZONE),
+        "total_income": total_income,
+        "total_expense": total_expense,
+        "net": total_income - total_expense,
+        "top_categories": top_categories,
+        "top_expenses": top_expenses,
+        "transaction_count": len(txs),
+    }
+
+
+def _rule_based_finance_comment(data: dict) -> str:
+    if data["transaction_count"] == 0:
+        return "Chua co giao dich trong ky nay, nen chua co xu huong de nhan xet."
+    if data["net"] >= 0:
+        return "Thu nhap dang lon hon chi tieu trong ky nay. Hay tiep tuc theo doi cac danh muc chi lon nhat."
+    return "Chi tieu dang cao hon thu nhap trong ky nay. Nen ra soat cac khoan chi lon va danh muc dung dau."
+
+
+def _ai_finance_comment(data: dict, mode: str) -> str:
+    prompt = (
+        "Viet mot nhan xet tai chinh ca nhan bang tieng Viet, toi da 2 cau. "
+        "Chi dua vao JSON so lieu da tinh san, khong tu tinh lai va khong bia so.\n"
+        f"Mode: {mode}\nData: {json.dumps(data, ensure_ascii=False)}"
+    )
+    try:
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "HTTP-Referer": "https://github.com/Hoangsonn05/So-Thu-Chi-React-Native",
+            "X-Title": "So Thu Chi Finance Report",
+        }
+        response = requests.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"].strip()
+        return content or _rule_based_finance_comment(data)
+    except Exception as e:
+        print(f"[Finance Report AI Comment Error] {e}")
+        return _rule_based_finance_comment(data)
+
+
+def _render_finance_report_content(data: dict, comment: str) -> str:
+    lines = [
+        f"Ky bao cao: {data['period']}",
+        f"Tong thu: {_format_vnd(data['total_income'])}",
+        f"Tong chi: {_format_vnd(data['total_expense'])}",
+        f"Chenh lech: {_format_vnd(data['net'])}",
+        "",
+        "Top 3 danh muc chi:",
+    ]
+    if data["top_categories"]:
+        for item in data["top_categories"]:
+            lines.append(f"- {item['category']}: {_format_vnd(item['amount'])}")
+    else:
+        lines.append("- Chua co chi tieu")
+
+    lines.extend(["", "Top 3 giao dich chi lon nhat:"])
+    if data["top_expenses"]:
+        for tx in data["top_expenses"]:
+            note = tx.get("note") or tx.get("source") or tx.get("category") or "Giao dich"
+            lines.append(f"- {note}: {_format_vnd(tx.get('amount', 0))}")
+    else:
+        lines.append("- Chua co giao dich chi")
+
+    lines.extend(["", f"Nhan xet: {comment}"])
+    return "\n".join(lines)
+
+
+def _finance_report_ref(db, uid: str, report_id: str):
+    return db.collection("users").document(uid).collection("finance_reports").document(report_id)
+
+
+def build_finance_report_id(uid: str, task_type: str, timeframe: str, date_key: str, delivery_mode: str) -> str:
+    return f"{uid}_{task_type}_{timeframe}_{date_key}_{delivery_mode}"
+
+
+def save_finance_report(uid: str, report_id: str, task_type: str, timeframe: str, date_key: str, delivery_mode: str, title: str, content: str, data: dict, status: str, payload: Optional[dict] = None) -> None:
+    db = firestore.client()
+    _finance_report_ref(db, uid, report_id).set({
+        "uid": uid,
+        "task_type": task_type,
+        "timeframe": timeframe,
+        "date_key": date_key,
+        "generated_at": firestore.SERVER_TIMESTAMP,
+        "delivery_mode": delivery_mode,
+        "title": title,
+        "content": content,
+        "data": data,
+        "status": status,
+        "payload": payload or {},
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }, merge=True)
 
 
 def _category_matches(actual: str, requested: str) -> bool:
@@ -718,10 +1020,14 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "schedule_type": { "type": "string", "description": "daily, weekly, monthly, or once." },
+                        "frequency": { "type": "string", "description": "Alias for schedule_type: daily, weekly, monthly." },
+                        "time": { "type": "string", "description": "Local Asia/Bangkok time HH:MM, for example 21:00 or 8h." },
+                        "timeframe": { "type": "string", "description": "today, current_week, or current_month." },
                         "target_datetime": { "type": "string", "description": "Thời gian gửi báo cáo (định dạng ISO 8601, ví dụ: '2026-05-08T16:20:00+07:00')" },
                         "report_type": { "type": "string", "description": "Loại báo cáo cần gửi (ví dụ: 'weekly_summary', 'daily_summary')" }
                     },
-                    "required": ["target_datetime", "report_type"]
+                    "required": ["report_type"]
                 }
             }
         },
@@ -851,7 +1157,11 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                 db_result = execute_schedule_report(
                     firebase_uid=firebase_uid,
                     target_datetime_iso=arguments.get("target_datetime"),
-                    report_type=arguments.get("report_type", "summary")
+                    report_type=arguments.get("report_type", "daily_finance_report"),
+                    schedule_type=arguments.get("schedule_type"),
+                    time=arguments.get("time"),
+                    frequency=arguments.get("frequency"),
+                    timeframe=arguments.get("timeframe")
                 )
             elif function_name == "compare_periods":
                 db_result = execute_compare_periods(
@@ -1328,7 +1638,9 @@ def ensure_default_scheduled_tasks(db) -> None:
             continue
         uid = user_doc.id
         _create_default_task_if_missing(db, uid, DEFAULT_EXTERNAL_BRIEF_TASK_TYPE, DEFAULT_EXTERNAL_SEND_TIME)
-        if not _user_has_custom_finance_task(db, uid):
+        if _user_has_custom_finance_task(db, uid):
+            disable_default_finance_report_task_for_user(uid)
+        else:
             _create_default_task_if_missing(db, uid, DEFAULT_DAILY_FINANCE_TASK_TYPE, DEFAULT_FINANCE_SEND_TIME)
 
 
@@ -1509,15 +1821,27 @@ def create_and_send_external_report(uid: str, task_type: str, delivery_mode: str
         raise
 
 
-def generate_finance_report(uid: str, task_type: str) -> str:
-    timeframe = _timeframe_for_task_type(task_type)
-    if task_type == "weekly_finance_report":
-        query = "Hay lap bao cao tai chinh tuan nay (current_week): tong thu, tong chi, so du va top khoan chi lon."
-    elif task_type == "monthly_finance_report":
-        query = "Hay lap bao cao tai chinh thang nay (current_month): tong thu, tong chi, so du va top khoan chi lon."
-    else:
-        query = f"Hay lap bao cao tai chinh hom nay ({timeframe}): tong thu, tong chi, so du va cac khoan chi dang chu y."
-    return chat_with_agentic_ai(query, uid) or "Chua tao duoc bao cao tai chinh luc nay."
+def generate_finance_report(uid: str, timeframe: str = "today", mode: str = "scheduled", task_type: str = DEFAULT_DAILY_FINANCE_TASK_TYPE) -> str:
+    data = _build_finance_report_data(uid, timeframe)
+    comment = _ai_finance_comment(data, mode)
+    return _render_finance_report_content(data, comment)
+
+
+def create_and_send_finance_report(uid: str, task_type: str, timeframe: str, delivery_mode: str, payload: Optional[dict] = None) -> tuple[str, dict, str]:
+    data = _build_finance_report_data(uid, timeframe)
+    comment = _ai_finance_comment(data, delivery_mode)
+    content = _render_finance_report_content(data, comment)
+    title = FINANCE_REPORT_TITLES.get(task_type, "Bao cao tai chinh")
+    date_key = data["date_key"]
+    report_id = build_finance_report_id(uid, task_type, timeframe, date_key, delivery_mode)
+    report_payload = {"task_type": task_type, "timeframe": timeframe, "delivery_mode": delivery_mode, **(payload or {})}
+    try:
+        send_result = send_report_to_user(uid, title, content, report_payload)
+        save_finance_report(uid, report_id, task_type, timeframe, date_key, delivery_mode, title, content, data, "sent", {**report_payload, "sent": send_result})
+        return content, send_result, report_id
+    except Exception as e:
+        save_finance_report(uid, report_id, task_type, timeframe, date_key, delivery_mode, title, content, data, "failed", {**report_payload, "error": str(e)[:300]})
+        raise
 
 
 def send_manual_report_previous(uid: str, task_type: str) -> str:
@@ -1536,7 +1860,7 @@ def send_manual_report_previous(uid: str, task_type: str) -> str:
         mark_manual_report_delivery(uid, task_type, scheduled_time, skip_auto_today=skip_auto)
         title = "Bao cao du lieu ngoai"
     else:
-        content = generate_finance_report(uid, task_type)
+        content = generate_finance_report(uid, _timeframe_for_task_type(task_type), "manual", task_type)
         scheduled_time = DEFAULT_FINANCE_SEND_TIME
         mark_manual_report_delivery(uid, task_type, scheduled_time, skip_auto_today=False)
         title = "Bao cao tai chinh"
@@ -1585,7 +1909,8 @@ def _execute_scheduled_task(db, doc, task: dict, now_utc: datetime) -> None:
                 content = generate_external_brief(task_type)
                 title = "Bao cao du lieu ngoai"
             else:
-                content = generate_finance_report(uid, task_type)
+                timeframe = (task.get("payload") or {}).get("timeframe") or _timeframe_for_task_type(task_type)
+                content = generate_finance_report(uid, timeframe, "auto", task_type)
                 title = "Bao cao tai chinh"
             if bot_token and chat_id:
                 send_tg_msg(bot_token, chat_id, f"{title}\n\n{content}")
@@ -1918,10 +2243,18 @@ def send_manual_report(uid: str, task_type: str) -> str:
     if task_type in EXTERNAL_BRIEF_TASK_TYPES:
         return handle_manual_external_report_request(uid, task_type, source="manual_report")
 
-    content = generate_finance_report(uid, task_type)
+    timeframe = _timeframe_for_task_type(task_type)
+    content, _send_result, report_id = create_and_send_finance_report(
+        uid,
+        task_type,
+        timeframe,
+        "manual",
+        {"source": "manual_report"},
+    )
     scheduled_time = DEFAULT_FINANCE_SEND_TIME
     mark_manual_report_delivery(uid, task_type, scheduled_time, skip_auto_today=False)
-    send_report_to_user(uid, "Bao cao tai chinh", content, {"task_type": task_type, "delivery_mode": "manual"})
+    date_key = get_date_key(get_vn_now(), DEFAULT_TIMEZONE)
+    update_delivery_state(uid, task_type, date_key, last_report_id=report_id)
     print(f"[Scheduler] manual report sent uid={uid} type={task_type} skip_auto_today=False")
     return content
 
@@ -1930,7 +2263,8 @@ def _scheduled_report_content(uid: str, task_type: str, payload: dict) -> tuple[
     if task_type in EXTERNAL_BRIEF_TASK_TYPES:
         return "Bao cao du lieu ngoai", generate_external_brief(task_type)
     if task_type in FINANCE_REPORT_TASK_TYPES:
-        return "Bao cao tai chinh", generate_finance_report(uid, task_type)
+        timeframe = (payload or {}).get("timeframe") or _timeframe_for_task_type(task_type)
+        return "Bao cao tai chinh", generate_finance_report(uid, timeframe, "auto", task_type)
     raise ValueError("unsupported_task_type")
 
 
@@ -1996,9 +2330,15 @@ def execute_scheduled_task(task_id: str, task_data: dict) -> dict:
             )
             _mark_auto_delivery(uid, task_type, report_id, scheduled_time, now_utc)
         else:
-            title, content = _scheduled_report_content(uid, task_type, payload)
-            send_result = send_report_to_user(uid, title, content, {"task_type": task_type, **payload})
-            _mark_auto_delivery(uid, task_type, task_id, scheduled_time, now_utc)
+            timeframe = payload.get("timeframe") or _timeframe_for_task_type(task_type)
+            _content, send_result, report_id = create_and_send_finance_report(
+                uid,
+                task_type,
+                timeframe,
+                "auto",
+                {"scheduled_task_id": task_id, **payload},
+            )
+            _mark_auto_delivery(uid, task_type, report_id, scheduled_time, now_utc)
         _mark_task_success(task_id, task, now_utc)
         print(f"[Scheduler] task success id={task_id} uid={uid} type={task_type} sent={send_result}")
         return {"status": "success", "sent": send_result}

@@ -155,9 +155,32 @@ app = FastAPI(title="Firestore Export & Telegram Bot API", lifespan=lifespan)
 
 def process_agentic_query(bot_token: str, firebase_uid: str, chat_id: int, text: str):
     """ Xử lý Agentic AI Workflow cho các câu truy vấn báo cáo tài chính """
-    from agentic_ai import chat_with_agentic_ai, handle_manual_external_report_request, send_manual_report, EXTERNAL_BRIEF_TASK_TYPES
+    from agentic_ai import (
+        chat_with_agentic_ai,
+        create_custom_finance_report_task,
+        handle_manual_external_report_request,
+        list_finance_report_tasks,
+        send_manual_report,
+        stop_custom_finance_reports,
+        EXTERNAL_BRIEF_TASK_TYPES,
+    )
     try:
         print(f"[Agentic] Bắt đầu xử lý truy vấn cho UID: {firebase_uid}")
+        intent_text = _normalize_intent_text(text)
+        schedule_match = re.search(r"(?:luc|lúc)\s*(\d{1,2})(?::?([0-5]\d))?\s*h?", intent_text)
+        if any(k in intent_text for k in ["huy lich bao cao", "hủy lịch báo cáo", "stopreport"]):
+            send_telegram_message(bot_token, chat_id, stop_custom_finance_reports(firebase_uid))
+            return
+        if any(k in intent_text for k in ["xem lich bao cao", "lich bao cao", "myreports"]):
+            send_telegram_message(bot_token, chat_id, list_finance_report_tasks(firebase_uid))
+            return
+        if schedule_match and "bao cao" in intent_text and any(k in intent_text for k in ["tai chinh", "chi tieu"]):
+            hour = int(schedule_match.group(1))
+            minute = int(schedule_match.group(2) or 0)
+            report_type = "expense_report" if "chi tieu" in intent_text else "daily_finance_report"
+            result = create_custom_finance_report_task(firebase_uid, f"{hour:02d}:{minute:02d}", "daily", report_type, "today")
+            send_telegram_message(bot_token, chat_id, json.loads(result).get("message", "Da len lich bao cao."))
+            return
         manual_task_type = _detect_manual_report_task_type(text)
         if manual_task_type:
             print(f"[Agentic] Manual report task detected: uid={firebase_uid}, task={manual_task_type}")
@@ -914,8 +937,9 @@ async def setup_telegram_bot(request: TelegramSetupRequest):
             # Cập nhật cache ngay lập tức
             _bot_token_to_uid_cache[bot_token] = uid
             try:
-                from agentic_ai import ensure_default_external_brief_task_for_user
+                from agentic_ai import ensure_default_external_brief_task_for_user, ensure_default_finance_report_task_for_user
                 ensure_default_external_brief_task_for_user(uid)
+                ensure_default_finance_report_task_for_user(uid)
             except Exception as task_error:
                 print(f"[SetupBot] Cannot ensure external brief task for {uid}: {task_error}")
             print(f"[SetupBot] Successfully linked token to UID: {uid}")
@@ -2128,11 +2152,24 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
         if text.lower() == "/start":
             msg = "✅ Bot da ket noi voi So Thu Chi!\nBan co the nhan tin nhu: 'An sang 30k'"
             try:
-                from agentic_ai import ensure_default_external_brief_task_for_user
+                from agentic_ai import ensure_default_external_brief_task_for_user, ensure_default_finance_report_task_for_user
                 ensure_default_external_brief_task_for_user(firebase_uid)
+                ensure_default_finance_report_task_for_user(firebase_uid)
             except Exception as task_error:
                 print(f"[Webhook] Cannot ensure external brief task for {firebase_uid}: {task_error}")
             background_tasks.add_task(send_telegram_message, bot_token, chat_id, msg)
+        elif text.lower().startswith("/setreport"):
+            parts = text.split(maxsplit=1)
+            user_time = parts[1].strip() if len(parts) > 1 else "20:00"
+            from agentic_ai import create_custom_finance_report_task
+            result = create_custom_finance_report_task(firebase_uid, user_time, "daily", "daily_finance_report", "today")
+            send_telegram_message(bot_token, chat_id, json.loads(result).get("message", "Da len lich bao cao."))
+        elif text.lower() == "/myreports":
+            from agentic_ai import list_finance_report_tasks
+            send_telegram_message(bot_token, chat_id, list_finance_report_tasks(firebase_uid))
+        elif text.lower() == "/stopreport":
+            from agentic_ai import stop_custom_finance_reports
+            send_telegram_message(bot_token, chat_id, stop_custom_finance_reports(firebase_uid))
         elif text.lower() == "/help":
             background_tasks.add_task(_handle_help_command, bot_token, chat_id)
         else:
@@ -2149,7 +2186,8 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
                 "thống kê", "đặt", "hạn mức", "ngân sách", "giới hạn", "giá vàng",
                 "gia vang", "giá xăng", "gia xang", "xăng dầu", "xang dau", "openai",
                 "chatgpt", "claude", "gemini", "deepseek", "gpt", "sjc", "pnj",
-                "gia ai", "goi ai", "morning brief", "tai chinh ngoai", "du lieu ngoai", "thi truong"
+                "gia ai", "goi ai", "morning brief", "tai chinh ngoai", "du lieu ngoai", "thi truong",
+                "lich bao cao", "huy lich", "xem lich"
             ])
             
             if is_query:
