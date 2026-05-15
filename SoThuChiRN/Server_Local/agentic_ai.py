@@ -1727,15 +1727,20 @@ def _save_external_brief_snapshot(task_type: str, date_key: str, content: str, s
 
 
 def collect_external_brief_data(task_type: str, date_key: str) -> Optional[dict]:
-    """Hook for real collectors.
+    from external_brief import generate_external_brief as build_external_brief
 
-    Expected future return shape:
-    {
-        "content": "ready-to-send Vietnamese brief",
-        "sources": [{"name": "...", "url": "..."}],
+    generated = build_external_brief(
+        "_system",
+        task_type,
+        mode="auto",
+        force_refresh=True,
+        save_report=False,
+    )
+    return {
+        "content": generated.get("content", ""),
+        "sources": generated.get("sources") or [],
+        "snapshots": generated.get("snapshots") or {},
     }
-    """
-    return None
 
 
 def _fallback_external_brief_content(task_type: str) -> str:
@@ -1767,41 +1772,45 @@ def generate_external_brief_payload(task_type: str, uid: Optional[str] = None, n
 
     current = now or get_vn_now()
     date_key = get_date_key(current, DEFAULT_TIMEZONE)
-    if not force_refresh:
-        cached = get_external_brief_snapshot(task_type, date_key)
-        cached_content = (cached or {}).get("content")
-        if isinstance(cached_content, str) and cached_content.strip():
-            print(f"[External Brief] cache hit task={task_type} date={date_key}")
-            return {
-                "content": cached_content.strip(),
-                "sources": cached.get("sources") or [],
-                "source_status": cached.get("source_status") or "cache",
-                "payload": cached.get("source_payload") or {},
-            }
-
     try:
-        collected = collect_external_brief_data(task_type, date_key)
+        from external_brief import generate_external_brief as build_external_brief
+
+        generated = build_external_brief(
+            uid or "_system",
+            task_type,
+            mode="manual" if uid else "auto",
+            force_refresh=force_refresh,
+            now=current,
+            save_report=False,
+        )
+        print(f"[External Brief] generated task={task_type} date={date_key} source=collector")
+        return {
+            "content": generated.get("content", ""),
+            "sources": generated.get("sources") or [],
+            "source_status": "collector",
+            "payload": {"snapshots": generated.get("snapshots") or {}},
+        }
     except Exception as e:
         print(f"[External Brief Collector Error] task={task_type} date={date_key}: {e}")
-        collected = None
-    content, source_status, source_payload = _render_external_brief(task_type, collected)
-    sources = []
-    if isinstance(source_payload, dict):
-        sources = source_payload.get("sources") or []
-    _save_external_brief_snapshot(task_type, date_key, content, source_status, source_payload)
-    db = firestore.client()
-    _external_brief_snapshot_ref(db, task_type, date_key).set({"sources": sources}, merge=True)
-    print(f"[External Brief] generated task={task_type} date={date_key} source={source_status}")
-    return {
-        "content": content,
-        "sources": sources,
-        "source_status": source_status,
-        "payload": source_payload,
-    }
+        content = _fallback_external_brief_content(task_type)
+        return {"content": content, "sources": [], "source_status": "collector_error", "payload": {"error": str(e)[:300]}}
 
 
-def generate_external_brief(task_type: str, uid: Optional[str] = None, now: Optional[datetime] = None, force_refresh: bool = False) -> str:
-    return generate_external_brief_payload(task_type, uid=uid, now=now, force_refresh=force_refresh)["content"]
+def generate_external_brief(uid_or_task_type: str, task_type: Optional[str] = None, mode: str = "auto", force_refresh: bool = False, now: Optional[datetime] = None) -> str:
+    if task_type is None:
+        return generate_external_brief_payload(uid_or_task_type, now=now, force_refresh=force_refresh)["content"]
+
+    from external_brief import generate_external_brief as build_external_brief
+
+    generated = build_external_brief(
+        uid_or_task_type,
+        task_type,
+        mode=mode,
+        force_refresh=force_refresh,
+        now=now,
+        save_report=True,
+    )
+    return generated.get("content", "")
 
 
 def _external_report_ref(db, uid: str, report_id: str):
