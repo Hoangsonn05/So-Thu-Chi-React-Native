@@ -177,7 +177,7 @@ def process_agentic_query(bot_token: str, firebase_uid: str, chat_id: int, text:
         send_telegram_message(bot_token, chat_id, "Đã có lỗi xảy ra khi xử lý yêu cầu của bạn.")
 
 
-def _detect_manual_report_task_type(text: str) -> Optional[str]:
+def _detect_manual_report_task_type_legacy(text: str) -> Optional[str]:
     lower_text = (text or "").strip().lower()
     if not lower_text:
         return None
@@ -913,6 +913,11 @@ async def setup_telegram_bot(request: TelegramSetupRequest):
             
             # Cập nhật cache ngay lập tức
             _bot_token_to_uid_cache[bot_token] = uid
+            try:
+                from agentic_ai import ensure_default_external_brief_task_for_user
+                ensure_default_external_brief_task_for_user(uid)
+            except Exception as task_error:
+                print(f"[SetupBot] Cannot ensure external brief task for {uid}: {task_error}")
             print(f"[SetupBot] Successfully linked token to UID: {uid}")
             
         except Exception as e:
@@ -2122,6 +2127,11 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
 
         if text.lower() == "/start":
             msg = "✅ Bot da ket noi voi So Thu Chi!\nBan co the nhan tin nhu: 'An sang 30k'"
+            try:
+                from agentic_ai import ensure_default_external_brief_task_for_user
+                ensure_default_external_brief_task_for_user(firebase_uid)
+            except Exception as task_error:
+                print(f"[Webhook] Cannot ensure external brief task for {firebase_uid}: {task_error}")
             background_tasks.add_task(send_telegram_message, bot_token, chat_id, msg)
         elif text.lower() == "/help":
             background_tasks.add_task(_handle_help_command, bot_token, chat_id)

@@ -42,6 +42,7 @@ EXTERNAL_BRIEF_TITLES = {
     "ai_price_brief": "Bao cao gia AI",
 }
 EXTERNAL_BRIEF_FALLBACK_MESSAGE = "Tính năng đang có khung xử lý, nguồn dữ liệu chưa cấu hình."
+DEFAULT_EXTERNAL_BRIEF_TASK_TYPE = "morning_external_brief"
 FINANCE_REPORT_TASK_TYPES = {
     "expense_report",
     "daily_finance_report",
@@ -1251,10 +1252,36 @@ def _default_task_id(uid: str, task_type: str) -> str:
     return f"{uid}_{task_type}_default"
 
 
+def _default_task_exists(db, uid: str, task_type: str, send_time: str) -> bool:
+    for snap in (
+        db.collection("scheduled_tasks")
+        .where(filter=FieldFilter("uid", "==", uid))
+        .stream()
+    ):
+        task = snap.to_dict() or {}
+        if (
+            task.get("task_type") == task_type
+            and task.get("schedule_type") == "default_daily"
+            and task.get("time") == send_time
+            and task.get("status") == "active"
+        ):
+            return True
+    return False
+
+
 def _create_default_task_if_missing(db, uid: str, task_type: str, send_time: str) -> None:
+    if _default_task_exists(db, uid, task_type, send_time):
+        return
     doc_ref = db.collection("scheduled_tasks").document(_default_task_id(uid, task_type))
     if doc_ref.get().exists:
-        return
+        existing = doc_ref.get().to_dict() or {}
+        if (
+            existing.get("task_type") == task_type
+            and existing.get("schedule_type") == "default_daily"
+            and existing.get("time") == send_time
+            and existing.get("status") == "active"
+        ):
+            return
     now_utc = datetime.now(timezone.utc)
     task = {
         "uid": uid,
@@ -1273,6 +1300,11 @@ def _create_default_task_if_missing(db, uid: str, task_type: str, send_time: str
     task["next_run_at"] = calculate_next_run_at(task, now_utc)
     doc_ref.set(task, merge=True)
     print(f"[Scheduler] ensured default task uid={uid} task={task_type} time={send_time}")
+
+
+def ensure_default_external_brief_task_for_user(uid: str) -> None:
+    db = firestore.client()
+    _create_default_task_if_missing(db, uid, DEFAULT_EXTERNAL_BRIEF_TASK_TYPE, DEFAULT_EXTERNAL_SEND_TIME)
 
 
 def _user_has_custom_finance_task(db, uid: str) -> bool:
@@ -1295,8 +1327,7 @@ def ensure_default_scheduled_tasks(db) -> None:
         if not ((tg_config.get("botToken") and tg_config.get("chatId")) or fcm_token):
             continue
         uid = user_doc.id
-        for task_type in sorted(EXTERNAL_BRIEF_TASK_TYPES):
-            _create_default_task_if_missing(db, uid, task_type, DEFAULT_EXTERNAL_SEND_TIME)
+        _create_default_task_if_missing(db, uid, DEFAULT_EXTERNAL_BRIEF_TASK_TYPE, DEFAULT_EXTERNAL_SEND_TIME)
         if not _user_has_custom_finance_task(db, uid):
             _create_default_task_if_missing(db, uid, DEFAULT_DAILY_FINANCE_TASK_TYPE, DEFAULT_FINANCE_SEND_TIME)
 
@@ -1356,13 +1387,30 @@ def collect_external_brief_data(task_type: str, date_key: str) -> Optional[dict]
     return None
 
 
+def _fallback_external_brief_content(task_type: str) -> str:
+    if task_type == "morning_external_brief":
+        return (
+            f"{EXTERNAL_BRIEF_FALLBACK_MESSAGE}\n\n"
+            "Gia vang: chua lay duoc du lieu.\n"
+            "Gia xang: chua lay duoc du lieu.\n"
+            "Gia/goi AI ChatGPT, Gemini, DeepSeek: chua lay duoc du lieu."
+        )
+    if task_type == "gold_price_brief":
+        return f"{EXTERNAL_BRIEF_FALLBACK_MESSAGE}\n\nGia vang: chua lay duoc du lieu."
+    if task_type == "fuel_price_brief":
+        return f"{EXTERNAL_BRIEF_FALLBACK_MESSAGE}\n\nGia xang dau: chua lay duoc du lieu."
+    if task_type == "ai_price_brief":
+        return f"{EXTERNAL_BRIEF_FALLBACK_MESSAGE}\n\nGia/goi AI ChatGPT, Gemini, DeepSeek: chua lay duoc du lieu."
+    return EXTERNAL_BRIEF_FALLBACK_MESSAGE
+
+
 def _render_external_brief(task_type: str, collected: Optional[dict]) -> tuple[str, str, dict]:
     if collected and isinstance(collected.get("content"), str) and collected["content"].strip():
         return collected["content"].strip(), "collector", collected
-    return EXTERNAL_BRIEF_FALLBACK_MESSAGE, "collector_not_configured", {}
+    return _fallback_external_brief_content(task_type), "collector_not_configured", {}
 
 
-def generate_external_brief(task_type: str, uid: Optional[str] = None, now: Optional[datetime] = None, force_refresh: bool = False) -> str:
+def generate_external_brief_payload(task_type: str, uid: Optional[str] = None, now: Optional[datetime] = None, force_refresh: bool = False) -> dict:
     if task_type not in EXTERNAL_BRIEF_TASK_TYPES:
         raise ValueError("unsupported_external_brief_type")
 
@@ -1373,13 +1421,92 @@ def generate_external_brief(task_type: str, uid: Optional[str] = None, now: Opti
         cached_content = (cached or {}).get("content")
         if isinstance(cached_content, str) and cached_content.strip():
             print(f"[External Brief] cache hit task={task_type} date={date_key}")
-            return cached_content.strip()
+            return {
+                "content": cached_content.strip(),
+                "sources": cached.get("sources") or [],
+                "source_status": cached.get("source_status") or "cache",
+                "payload": cached.get("source_payload") or {},
+            }
 
-    collected = collect_external_brief_data(task_type, date_key)
+    try:
+        collected = collect_external_brief_data(task_type, date_key)
+    except Exception as e:
+        print(f"[External Brief Collector Error] task={task_type} date={date_key}: {e}")
+        collected = None
     content, source_status, source_payload = _render_external_brief(task_type, collected)
+    sources = []
+    if isinstance(source_payload, dict):
+        sources = source_payload.get("sources") or []
     _save_external_brief_snapshot(task_type, date_key, content, source_status, source_payload)
+    db = firestore.client()
+    _external_brief_snapshot_ref(db, task_type, date_key).set({"sources": sources}, merge=True)
     print(f"[External Brief] generated task={task_type} date={date_key} source={source_status}")
-    return content
+    return {
+        "content": content,
+        "sources": sources,
+        "source_status": source_status,
+        "payload": source_payload,
+    }
+
+
+def generate_external_brief(task_type: str, uid: Optional[str] = None, now: Optional[datetime] = None, force_refresh: bool = False) -> str:
+    return generate_external_brief_payload(task_type, uid=uid, now=now, force_refresh=force_refresh)["content"]
+
+
+def _external_report_ref(db, uid: str, report_id: str):
+    return db.collection("users").document(uid).collection("external_reports").document(report_id)
+
+
+def save_external_report(uid: str, report_id: str, task_type: str, date_key: str, delivery_mode: str, title: str, content: str, sources: list, status: str, payload: Optional[dict] = None) -> None:
+    db = firestore.client()
+    _external_report_ref(db, uid, report_id).set({
+        "uid": uid,
+        "task_type": task_type,
+        "date_key": date_key,
+        "generated_at": firestore.SERVER_TIMESTAMP,
+        "delivery_mode": delivery_mode,
+        "title": title,
+        "content": content,
+        "sources": sources or [],
+        "status": status,
+        "payload": payload or {},
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }, merge=True)
+
+
+def build_external_report_id(uid: str, task_type: str, date_key: str, delivery_mode: str, now: Optional[datetime] = None) -> str:
+    if delivery_mode == "auto":
+        return f"{uid}_{task_type}_{date_key}_auto"
+    current = now or get_vn_now()
+    stamp = current.strftime("%H%M%S")
+    return f"{uid}_{task_type}_{date_key}_manual_{stamp}"
+
+
+def create_and_send_external_report(uid: str, task_type: str, delivery_mode: str, report_id: str, now: Optional[datetime] = None, force_refresh: bool = False, extra_payload: Optional[dict] = None) -> tuple[str, dict]:
+    current = now or get_vn_now()
+    date_key = get_date_key(current, DEFAULT_TIMEZONE)
+    title = EXTERNAL_BRIEF_TITLES.get(task_type, "Bao cao du lieu ngoai")
+    generated = generate_external_brief_payload(task_type, uid=uid, now=current, force_refresh=force_refresh)
+    content = generated["content"]
+    payload = {
+        "task_type": task_type,
+        "delivery_mode": delivery_mode,
+        "source_status": generated.get("source_status"),
+        **(extra_payload or {}),
+    }
+    try:
+        send_result = send_report_to_user(uid, title, content, payload)
+        save_external_report(
+            uid, report_id, task_type, date_key, delivery_mode, title, content,
+            generated.get("sources") or [], "sent", {**payload, "sent": send_result, "source_payload": generated.get("payload") or {}},
+        )
+        return content, send_result
+    except Exception as e:
+        save_external_report(
+            uid, report_id, task_type, date_key, delivery_mode, title, content,
+            generated.get("sources") or [], "failed", {**payload, "error": str(e)[:300], "source_payload": generated.get("payload") or {}},
+        )
+        raise
 
 
 def generate_finance_report(uid: str, task_type: str) -> str:
@@ -1759,13 +1886,15 @@ def handle_manual_external_report_request(uid: str, requested_type: str, source:
     current_state = get_delivery_state(uid, requested_type, date_key)
     skip_auto_today = bool(current_state.get("skip_auto_today")) or now < scheduled_at
 
-    content = generate_external_brief(requested_type, uid=uid, now=now)
-    title = EXTERNAL_BRIEF_TITLES.get(requested_type, "Bao cao du lieu ngoai")
-    send_report_to_user(uid, title, content, {
-        "task_type": requested_type,
-        "delivery_mode": "manual",
-        "source": source,
-    })
+    report_id = build_external_report_id(uid, requested_type, date_key, "manual", now)
+    content, _send_result = create_and_send_external_report(
+        uid,
+        requested_type,
+        "manual",
+        report_id,
+        now=now,
+        extra_payload={"source": source},
+    )
     update_delivery_state(
         uid,
         requested_type,
@@ -1775,7 +1904,7 @@ def handle_manual_external_report_request(uid: str, requested_type: str, source:
         manual_send_done=True,
         skip_auto_today=skip_auto_today,
         last_manual_at=firestore.SERVER_TIMESTAMP,
-        last_report_id=f"manual_{requested_type}_{date_key}",
+        last_report_id=report_id,
         last_manual_source=source,
     )
     print(
@@ -1815,7 +1944,7 @@ def _mark_auto_delivery(uid: str, task_type: str, task_id: str, scheduled_time: 
         scheduled_time=scheduled_time,
         auto_send_done=True,
         manual_send_done=state.get("manual_send_done", False),
-        skip_auto_today=state.get("skip_auto_today", False),
+        skip_auto_today=False,
         last_auto_at=firestore.SERVER_TIMESTAMP,
         last_report_id=task_id,
     )
@@ -1853,9 +1982,23 @@ def execute_scheduled_task(task_id: str, task_data: dict) -> dict:
             print(f"[Scheduler] task skipped due delivery_state id={task_id} uid={uid} type={task_type}")
             return {"status": "skipped", "reason": "delivery_state"}
 
-        title, content = _scheduled_report_content(uid, task_type, payload)
-        send_result = send_report_to_user(uid, title, content, {"task_type": task_type, **payload})
-        _mark_auto_delivery(uid, task_type, task_id, scheduled_time, now_utc)
+        if task_type in EXTERNAL_BRIEF_TASK_TYPES:
+            local_now = now_utc.astimezone(_get_tz(DEFAULT_TIMEZONE))
+            date_key = get_date_key(now_utc, DEFAULT_TIMEZONE)
+            report_id = build_external_report_id(uid, task_type, date_key, "auto", local_now)
+            _content, send_result = create_and_send_external_report(
+                uid,
+                task_type,
+                "auto",
+                report_id,
+                now=local_now,
+                extra_payload={"scheduled_task_id": task_id, **payload},
+            )
+            _mark_auto_delivery(uid, task_type, report_id, scheduled_time, now_utc)
+        else:
+            title, content = _scheduled_report_content(uid, task_type, payload)
+            send_result = send_report_to_user(uid, title, content, {"task_type": task_type, **payload})
+            _mark_auto_delivery(uid, task_type, task_id, scheduled_time, now_utc)
         _mark_task_success(task_id, task, now_utc)
         print(f"[Scheduler] task success id={task_id} uid={uid} type={task_type} sent={send_result}")
         return {"status": "success", "sent": send_result}
