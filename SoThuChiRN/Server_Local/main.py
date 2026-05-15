@@ -145,9 +145,14 @@ app = FastAPI(title="Firestore Export & Telegram Bot API", lifespan=lifespan)
 
 def process_agentic_query(bot_token: str, firebase_uid: str, chat_id: int, text: str):
     """ Xử lý Agentic AI Workflow cho các câu truy vấn báo cáo tài chính """
-    from agentic_ai import chat_with_agentic_ai
+    from agentic_ai import chat_with_agentic_ai, send_manual_report
     try:
         print(f"[Agentic] Bắt đầu xử lý truy vấn cho UID: {firebase_uid}")
+        manual_task_type = _detect_manual_report_task_type(text)
+        if manual_task_type:
+            print(f"[Agentic] Manual report task detected: uid={firebase_uid}, task={manual_task_type}")
+            send_manual_report(firebase_uid, manual_task_type)
+            return
         reply = chat_with_agentic_ai(text, firebase_uid)
         if reply:
             send_telegram_message(bot_token, chat_id, reply)
@@ -157,6 +162,28 @@ def process_agentic_query(bot_token: str, firebase_uid: str, chat_id: int, text:
         print(f"[Agentic Error] {e}")
         traceback.print_exc()
         send_telegram_message(bot_token, chat_id, "Đã có lỗi xảy ra khi xử lý yêu cầu của bạn.")
+
+
+def _detect_manual_report_task_type(text: str) -> Optional[str]:
+    lower_text = (text or "").strip().lower()
+    if not lower_text:
+        return None
+    wants_report = any(k in lower_text for k in ["báo cáo", "bao cao", "bản tin", "ban tin", "tóm tắt", "tom tat"])
+    if any(k in lower_text for k in ["giá vàng", "gia vang", "vàng hôm nay", "vang hom nay"]):
+        return "gold_price_brief"
+    if any(k in lower_text for k in ["giá xăng", "gia xang", "xăng dầu", "xang dau", "nhiên liệu", "nhien lieu"]):
+        return "fuel_price_brief"
+    if wants_report and any(k in lower_text for k in ["giá ai", "gia ai", "openai", "chatgpt", "claude", "gemini"]):
+        return "ai_price_brief"
+    if wants_report and any(k in lower_text for k in ["buổi sáng", "buoi sang", "morning", "dữ liệu ngoài", "du lieu ngoai"]):
+        return "morning_external_brief"
+    if wants_report and any(k in lower_text for k in ["tuần", "tuan", "weekly"]):
+        return "weekly_finance_report"
+    if wants_report and any(k in lower_text for k in ["tháng", "thang", "monthly"]):
+        return "monthly_finance_report"
+    if wants_report and any(k in lower_text for k in ["hôm nay", "hom nay", "ngày", "ngay", "daily", "chi tiêu", "chi tieu", "tài chính", "tai chinh"]):
+        return "daily_finance_report"
+    return None
 
 
 class ExportEmailRequest(BaseModel):
@@ -2059,7 +2086,12 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
             
             # Phân tích cơ bản để xem người dùng đang "ghi chép" hay "hỏi đáp/báo cáo"
             lower_text = text.lower()
-            is_query = any(keyword in lower_text for keyword in ["?", "báo cáo", "tổng", "bao nhiêu", "thống kê", "đặt", "hạn mức", "ngân sách", "giới hạn"])
+            is_query = any(keyword in lower_text for keyword in [
+                "?", "báo cáo", "bao cao", "bản tin", "ban tin", "tổng", "bao nhiêu",
+                "thống kê", "đặt", "hạn mức", "ngân sách", "giới hạn", "giá vàng",
+                "gia vang", "giá xăng", "gia xang", "xăng dầu", "xang dau", "openai",
+                "chatgpt", "claude", "gemini"
+            ])
             
             if is_query:
                 background_tasks.add_task(process_agentic_query, bot_token, firebase_uid, chat_id, text)

@@ -8,6 +8,10 @@ import re
 import unicodedata
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 from google.api_core.exceptions import FailedPrecondition
 from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -22,7 +26,36 @@ load_dotenv(os.path.join(BASE_DIR, '.env'), override=True)
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b:free"
-VN_TZ = timezone(timedelta(hours=7))
+DEFAULT_TIMEZONE = "Asia/Bangkok"
+DEFAULT_EXTERNAL_SEND_TIME = "07:00"
+DEFAULT_FINANCE_SEND_TIME = "20:00"
+EXTERNAL_BRIEF_TASK_TYPES = {
+    "morning_external_brief",
+    "gold_price_brief",
+    "fuel_price_brief",
+    "ai_price_brief",
+}
+FINANCE_REPORT_TASK_TYPES = {
+    "expense_report",
+    "daily_finance_report",
+    "weekly_finance_report",
+    "monthly_finance_report",
+}
+DEFAULT_DAILY_FINANCE_TASK_TYPE = "daily_finance_report"
+TASK_ACTIVE_STATUSES = {"active", "pending"}
+TASK_TERMINAL_STATUSES = {"completed", "failed", "disabled"}
+
+
+def _get_tz(timezone_name: str = DEFAULT_TIMEZONE):
+    if ZoneInfo:
+        try:
+            return ZoneInfo(timezone_name or DEFAULT_TIMEZONE)
+        except Exception:
+            pass
+    return timezone(timedelta(hours=7))
+
+
+VN_TZ = _get_tz(DEFAULT_TIMEZONE)
 
 # Prompt cho công việc tổng hợp/truy vấn của Agent
 AGENTIC_SYSTEM_PROMPT = """Bạn là "Giám đốc tài chính" AI chủ động của ứng dụng cá nhân Sổ Thu Chi.
@@ -105,6 +138,165 @@ def execute_set_budget_alert(firebase_uid: str, category: str, budget_amount: fl
         traceback.print_exc()
         return json.dumps({"status": "error", "error": str(e)})
 
+
+def get_vn_now() -> datetime:
+    return datetime.now(tz=VN_TZ)
+
+
+def get_date_key(dt: datetime, timezone_name: str = DEFAULT_TIMEZONE) -> str:
+    tz = _get_tz(timezone_name)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(tz).strftime("%Y-%m-%d")
+
+
+def _parse_hhmm(value: str, fallback: str = DEFAULT_FINANCE_SEND_TIME) -> tuple[int, int]:
+    text = (value or fallback).strip()
+    match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", text)
+    if not match:
+        text = fallback
+        match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", text)
+    return int(match.group(1)), int(match.group(2))
+
+
+def _coerce_datetime(value) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=VN_TZ)
+        except ValueError:
+            return None
+    return None
+
+
+def _task_type_from_legacy(task: dict) -> str:
+    report_type = (task.get("task_type") or task.get("report_type") or "daily_finance_report").strip()
+    aliases = {
+        "summary": "daily_finance_report",
+        "daily_summary": "daily_finance_report",
+        "weekly_summary": "weekly_finance_report",
+        "monthly_summary": "monthly_finance_report",
+        "finance_report": "daily_finance_report",
+    }
+    return aliases.get(report_type, report_type)
+
+
+def _timeframe_for_task_type(task_type: str) -> str:
+    if task_type == "weekly_finance_report":
+        return "current_week"
+    if task_type == "monthly_finance_report":
+        return "current_month"
+    return "today"
+
+
+def calculate_next_run_at(task: dict, from_dt: datetime) -> Optional[datetime]:
+    timezone_name = task.get("timezone") or DEFAULT_TIMEZONE
+    tz = _get_tz(timezone_name)
+    local_from = from_dt.astimezone(tz) if from_dt.tzinfo else from_dt.replace(tzinfo=tz)
+    schedule_type = (task.get("schedule_type") or "").strip().lower()
+
+    legacy_target = _coerce_datetime(task.get("target_datetime"))
+    if not schedule_type and legacy_target:
+        return legacy_target.astimezone(timezone.utc)
+
+    if schedule_type == "once":
+        target = _coerce_datetime(task.get("next_run_at")) or legacy_target
+        return target.astimezone(timezone.utc) if target else None
+
+    hour, minute = _parse_hhmm(task.get("time"), DEFAULT_FINANCE_SEND_TIME)
+    candidate = local_from.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    if schedule_type in {"daily", "default_daily", ""}:
+        if candidate <= local_from:
+            candidate += timedelta(days=1)
+        return candidate.astimezone(timezone.utc)
+
+    if schedule_type == "weekly":
+        payload = task.get("payload") or {}
+        weekday = int(payload.get("weekday", local_from.weekday()))
+        days_ahead = (weekday - local_from.weekday()) % 7
+        candidate = candidate + timedelta(days=days_ahead)
+        if candidate <= local_from:
+            candidate += timedelta(days=7)
+        return candidate.astimezone(timezone.utc)
+
+    if schedule_type == "monthly":
+        payload = task.get("payload") or {}
+        target_day = int(payload.get("day", local_from.day))
+
+        def monthly_candidate(year: int, month: int) -> datetime:
+            last_day = calendar.monthrange(year, month)[1]
+            day = min(max(1, target_day), last_day)
+            return datetime(year, month, day, hour, minute, tzinfo=tz)
+
+        candidate = monthly_candidate(local_from.year, local_from.month)
+        if candidate <= local_from:
+            year = local_from.year + (1 if local_from.month == 12 else 0)
+            month = 1 if local_from.month == 12 else local_from.month + 1
+            candidate = monthly_candidate(year, month)
+        return candidate.astimezone(timezone.utc)
+
+    return None
+
+
+def _delivery_state_ref(db, uid: str, task_type: str, date_key: str):
+    state_key = f"{task_type}_{date_key}"
+    return db.collection("users").document(uid).collection("delivery_state").document(state_key)
+
+
+def get_delivery_state(uid: str, task_type: str, date_key: str) -> dict:
+    db = firestore.client()
+    snap = _delivery_state_ref(db, uid, task_type, date_key).get()
+    return snap.to_dict() if snap.exists else {}
+
+
+def update_delivery_state(uid: str, task_type: str, date_key: str, **updates) -> None:
+    db = firestore.client()
+    payload = {
+        "uid": uid,
+        "task_type": task_type,
+        "date_key": date_key,
+        "scheduled_time": updates.get("scheduled_time"),
+        "auto_send_done": False,
+        "manual_send_done": False,
+        "skip_auto_today": False,
+        "last_manual_at": None,
+        "last_auto_at": None,
+        "last_report_id": None,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    payload.update(updates)
+    _delivery_state_ref(db, uid, task_type, date_key).set(payload, merge=True)
+
+
+def should_skip_auto_delivery(uid: str, task_type: str, scheduled_time: str, now: datetime) -> bool:
+    date_key = get_date_key(now, DEFAULT_TIMEZONE)
+    state = get_delivery_state(uid, task_type, date_key)
+    if state.get("auto_send_done"):
+        print(f"[DeliveryState] skip auto: already sent uid={uid} task={task_type} date={date_key}")
+        return True
+    if state.get("skip_auto_today"):
+        print(f"[DeliveryState] skip auto: manual before schedule uid={uid} task={task_type} date={date_key}")
+        return True
+    return False
+
+
+def mark_manual_report_delivery(uid: str, task_type: str, scheduled_time: str, skip_auto_today: bool = False) -> None:
+    now = get_vn_now()
+    date_key = get_date_key(now, DEFAULT_TIMEZONE)
+    update_delivery_state(
+        uid,
+        task_type,
+        date_key,
+        scheduled_time=scheduled_time,
+        manual_send_done=True,
+        skip_auto_today=skip_auto_today,
+        last_manual_at=firestore.SERVER_TIMESTAMP,
+        last_report_id=None,
+    )
+
 def execute_schedule_report(firebase_uid: str, target_datetime_iso: str, report_type: str) -> str:
     """ Lưu lịch báo cáo vào Firestore collection 'scheduled_tasks'. """
     db = firestore.client()
@@ -114,16 +306,44 @@ def execute_schedule_report(firebase_uid: str, target_datetime_iso: str, report_
         # Python 3.7+ hỗ trợ fromisoformat với múi giờ (+07:00)
         dt_str = target_datetime_iso.replace('Z', '+00:00')
         dt = datetime.fromisoformat(dt_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=VN_TZ)
         
         # Đảm bảo lưu đúng định dạng để sau này query dễ dàng
         target_utc = dt.astimezone(timezone.utc)
+        task_type = _task_type_from_legacy({"report_type": report_type})
+        local_dt = dt.astimezone(VN_TZ)
+        if task_type == "weekly_finance_report":
+            schedule_type = "weekly"
+        elif task_type == "monthly_finance_report":
+            schedule_type = "monthly"
+        elif task_type in {"daily_finance_report", "expense_report"} and report_type != "summary":
+            schedule_type = "daily"
+        else:
+            schedule_type = "once"
         
         task_data = {
             "uid": firebase_uid,
+            "task_type": task_type,
+            "schedule_type": schedule_type,
+            "timezone": DEFAULT_TIMEZONE,
+            "time": local_dt.strftime("%H:%M"),
+            "next_run_at": target_utc,
+            "last_run_at": None,
+            "last_success_at": None,
+            "retry_count": 0,
+            "payload": {
+                "report_type": report_type,
+                "source": "agentic_schedule_report",
+                "skip_default_if_manual_before_scheduled": False,
+                "weekday": local_dt.weekday(),
+                "day": local_dt.day,
+            },
             "target_datetime": target_utc,
             "report_type": report_type,
             "status": "pending",
-            "created_at": firestore.SERVER_TIMESTAMP
+            "created_at": firestore.SERVER_TIMESTAMP,
+            "updated_at": firestore.SERVER_TIMESTAMP,
         }
         
         db.collection("scheduled_tasks").add(task_data)
@@ -1002,7 +1222,207 @@ def recurring_expenses_daily_job():
 
 # -------------- POLLING JOB HÀNG PHÚT --------------
 
-def poll_scheduled_tasks_job():
+def _default_task_id(uid: str, task_type: str) -> str:
+    return f"{uid}_{task_type}_default"
+
+
+def _create_default_task_if_missing(db, uid: str, task_type: str, send_time: str) -> None:
+    doc_ref = db.collection("scheduled_tasks").document(_default_task_id(uid, task_type))
+    if doc_ref.get().exists:
+        return
+    now_utc = datetime.now(timezone.utc)
+    task = {
+        "uid": uid,
+        "task_type": task_type,
+        "schedule_type": "default_daily",
+        "status": "active",
+        "timezone": DEFAULT_TIMEZONE,
+        "time": send_time,
+        "last_run_at": None,
+        "last_success_at": None,
+        "retry_count": 0,
+        "payload": {"source": "system_default", "skip_default_if_manual_before_scheduled": False},
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    task["next_run_at"] = calculate_next_run_at(task, now_utc)
+    doc_ref.set(task, merge=True)
+    print(f"[Scheduler] ensured default task uid={uid} task={task_type} time={send_time}")
+
+
+def _user_has_custom_finance_task(db, uid: str) -> bool:
+    for snap in db.collection("scheduled_tasks").where(filter=FieldFilter("uid", "==", uid)).stream():
+        task = snap.to_dict() or {}
+        if task.get("status") not in TASK_ACTIVE_STATUSES:
+            continue
+        if task.get("schedule_type") == "default_daily":
+            continue
+        if _task_type_from_legacy(task) in {"expense_report", "daily_finance_report"}:
+            return True
+    return False
+
+
+def ensure_default_scheduled_tasks(db) -> None:
+    for user_doc in db.collection("users").stream():
+        user_data = user_doc.to_dict() or {}
+        tg_config = user_data.get("telegramConfig") or {}
+        if not (tg_config.get("botToken") and tg_config.get("chatId")):
+            continue
+        uid = user_doc.id
+        for task_type in sorted(EXTERNAL_BRIEF_TASK_TYPES):
+            _create_default_task_if_missing(db, uid, task_type, DEFAULT_EXTERNAL_SEND_TIME)
+        if not _user_has_custom_finance_task(db, uid):
+            _create_default_task_if_missing(db, uid, DEFAULT_DAILY_FINANCE_TASK_TYPE, DEFAULT_FINANCE_SEND_TIME)
+
+
+def _brief_prompt_for_task(task_type: str) -> str:
+    if task_type == "gold_price_brief":
+        return "Tao ban tin ngan ve gia vang hom nay cho nguoi dung Viet Nam. Neu khong co du lieu realtime, noi ro he thong chua co nguon gia realtime."
+    if task_type == "fuel_price_brief":
+        return "Tao ban tin ngan ve gia xang dau Viet Nam hom nay. Neu khong co du lieu realtime, noi ro he thong chua co nguon gia realtime."
+    if task_type == "ai_price_brief":
+        return "Tao ban tin ngan ve gia/chi phi cac dich vu AI pho bien hom nay. Neu khong co du lieu realtime, noi ro he thong chua co nguon gia realtime."
+    return "Tao ban tin buoi sang gom vang, xang dau va gia/chi phi AI. Neu khong co du lieu realtime, noi ro cac muc nao chua co nguon realtime."
+
+
+def generate_external_brief(task_type: str) -> str:
+    prompt = "Ban la tro ly bao cao ngan gon tren Telegram. Chi tra loi bang tieng Viet, 5-8 dong, khong bia so lieu. " + _brief_prompt_for_task(task_type)
+    try:
+        payload = {"model": MODEL_NAME, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2}
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "HTTP-Referer": "https://github.com/Hoangsonn05/So-Thu-Chi-React-Native",
+            "X-Title": "So Thu Chi External Brief",
+        }
+        response = requests.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=45)
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"[External Brief Error] task={task_type}: {e}")
+        return "Ban tin du lieu ngoai hien chua tao duoc do loi ket noi nguon AI/du lieu. He thong se thu lai o lan chay tiep theo."
+
+
+def generate_finance_report(uid: str, task_type: str) -> str:
+    timeframe = _timeframe_for_task_type(task_type)
+    if task_type == "weekly_finance_report":
+        query = "Hay lap bao cao tai chinh tuan nay (current_week): tong thu, tong chi, so du va top khoan chi lon."
+    elif task_type == "monthly_finance_report":
+        query = "Hay lap bao cao tai chinh thang nay (current_month): tong thu, tong chi, so du va top khoan chi lon."
+    else:
+        query = f"Hay lap bao cao tai chinh hom nay ({timeframe}): tong thu, tong chi, so du va cac khoan chi dang chu y."
+    return chat_with_agentic_ai(query, uid) or "Chua tao duoc bao cao tai chinh luc nay."
+
+
+def send_manual_report(uid: str, task_type: str) -> str:
+    db = firestore.client()
+    user_doc = db.collection("users").document(uid).get()
+    user_data = user_doc.to_dict() if user_doc.exists else {}
+    tg_config = (user_data or {}).get("telegramConfig") or {}
+    bot_token = tg_config.get("botToken")
+    chat_id = tg_config.get("chatId")
+    if task_type in EXTERNAL_BRIEF_TASK_TYPES:
+        content = generate_external_brief(task_type)
+        scheduled_time = DEFAULT_EXTERNAL_SEND_TIME
+        now = get_vn_now()
+        hour, minute = _parse_hhmm(scheduled_time, DEFAULT_EXTERNAL_SEND_TIME)
+        skip_auto = now < now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        mark_manual_report_delivery(uid, task_type, scheduled_time, skip_auto_today=skip_auto)
+        title = "Bao cao du lieu ngoai"
+    else:
+        content = generate_finance_report(uid, task_type)
+        scheduled_time = DEFAULT_FINANCE_SEND_TIME
+        mark_manual_report_delivery(uid, task_type, scheduled_time, skip_auto_today=False)
+        title = "Bao cao tai chinh"
+    if bot_token and chat_id:
+        send_tg_msg(bot_token, chat_id, f"{title}\n\n{content}")
+    return content
+
+
+def _normalize_task_for_execution(task: dict) -> dict:
+    normalized = dict(task)
+    task_type = _task_type_from_legacy(task)
+    normalized["task_type"] = task_type
+    normalized.setdefault("schedule_type", "once" if task.get("target_datetime") else "daily")
+    normalized.setdefault("timezone", DEFAULT_TIMEZONE)
+    normalized.setdefault("time", DEFAULT_EXTERNAL_SEND_TIME if task_type in EXTERNAL_BRIEF_TASK_TYPES else DEFAULT_FINANCE_SEND_TIME)
+    normalized.setdefault("payload", {})
+    normalized.setdefault("retry_count", 0)
+    return normalized
+
+
+def _task_due(task: dict, now_utc: datetime) -> bool:
+    next_run = _coerce_datetime(task.get("next_run_at")) or _coerce_datetime(task.get("target_datetime"))
+    return bool(next_run and next_run <= now_utc)
+
+
+def _execute_scheduled_task(db, doc, task: dict, now_utc: datetime) -> None:
+    task = _normalize_task_for_execution(task)
+    uid = task.get("uid")
+    task_type = task.get("task_type")
+    scheduled_time = task.get("time") or DEFAULT_FINANCE_SEND_TIME
+    if not uid:
+        doc.reference.set({"status": "failed", "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
+        return
+    doc.reference.set({"status": "processing", "last_run_at": firestore.SERVER_TIMESTAMP, "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
+    try:
+        if not should_skip_auto_delivery(uid, task_type, scheduled_time, now_utc):
+            user_doc = db.collection("users").document(uid).get()
+            if not user_doc.exists:
+                raise ValueError(f"user not found: {uid}")
+            user_data = user_doc.to_dict() or {}
+            tg_config = user_data.get("telegramConfig") or {}
+            bot_token = tg_config.get("botToken")
+            chat_id = tg_config.get("chatId")
+            fcm_token = user_data.get("fcmToken") or user_data.get("fcm_token")
+            if task_type in EXTERNAL_BRIEF_TASK_TYPES:
+                content = generate_external_brief(task_type)
+                title = "Bao cao du lieu ngoai"
+            else:
+                content = generate_finance_report(uid, task_type)
+                title = "Bao cao tai chinh"
+            if bot_token and chat_id:
+                send_tg_msg(bot_token, chat_id, f"{title}\n\n{content}")
+            if fcm_token:
+                send_fcm_push(uid, title, content[:150] + ("..." if len(content) > 150 else ""))
+            date_key = get_date_key(now_utc, task.get("timezone") or DEFAULT_TIMEZONE)
+            current_state = get_delivery_state(uid, task_type, date_key)
+            update_delivery_state(
+                uid,
+                task_type,
+                date_key,
+                scheduled_time=scheduled_time,
+                auto_send_done=True,
+                manual_send_done=current_state.get("manual_send_done", False),
+                skip_auto_today=current_state.get("skip_auto_today", False),
+                last_auto_at=firestore.SERVER_TIMESTAMP,
+                last_report_id=doc.id,
+            )
+        schedule_type = task.get("schedule_type")
+        if schedule_type == "once":
+            doc.reference.set({"status": "completed", "last_success_at": firestore.SERVER_TIMESTAMP, "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
+        else:
+            doc.reference.set({
+                "status": "active",
+                "next_run_at": calculate_next_run_at(task, now_utc + timedelta(seconds=1)),
+                "last_success_at": firestore.SERVER_TIMESTAMP,
+                "retry_count": 0,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            }, merge=True)
+        print(f"[Scheduler] task done id={doc.id} uid={uid} type={task_type}")
+    except Exception as e:
+        retry_count = int(task.get("retry_count", 0) or 0) + 1
+        doc.reference.set({
+            "status": "active" if task.get("schedule_type") != "once" else "pending",
+            "next_run_at": now_utc + timedelta(minutes=min(30, 2 ** min(retry_count, 5))),
+            "retry_count": retry_count,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        print(f"[Scheduler] task failed id={doc.id} uid={uid} type={task_type}: {e}")
+        traceback.print_exc()
+
+
+def poll_scheduled_tasks_job_legacy():
     """ Quét Firestore mỗi phút để tìm và thực thi các báo cáo đến hạn. """
     print(f"[Polling Job] Quét các tác vụ đến hạn: {datetime.now(tz=VN_TZ).strftime('%H:%M:%S')}")
     db = firestore.client()
@@ -1051,6 +1471,30 @@ def poll_scheduled_tasks_job():
     except FailedPrecondition as fpe:
         # Lỗi Index Firestore: Log ra thay vì in toàn bộ traceback hoặc crash
         print(f"[Polling Job Error] Firestore Error: Index missing or is currently building. Bỏ qua lần quét này. Chi tiết: {fpe}")
+    except Exception as e:
+        print(f"[Polling Job Error] {e}")
+        traceback.print_exc()
+
+def poll_scheduled_tasks_job():
+    """Quet Firestore moi phut de thuc thi scheduled_tasks schema moi va task cu."""
+    print(f"[Polling Job] scan due tasks: {datetime.now(tz=VN_TZ).strftime('%H:%M:%S')}")
+    db = firestore.client()
+    try:
+        now_utc = datetime.now(timezone.utc)
+        ensure_default_scheduled_tasks(db)
+
+        seen_ids = set()
+        for status in ("active", "pending"):
+            for doc in db.collection("scheduled_tasks").where(filter=FieldFilter("status", "==", status)).stream():
+                if doc.id in seen_ids:
+                    continue
+                seen_ids.add(doc.id)
+                task_data = doc.to_dict() or {}
+                if _task_due(task_data, now_utc):
+                    print(f"[Polling Job] executing task id={doc.id} uid={task_data.get('uid')} type={_task_type_from_legacy(task_data)}")
+                    _execute_scheduled_task(db, doc, task_data, now_utc)
+    except FailedPrecondition as fpe:
+        print(f"[Polling Job Error] Firestore index missing/building. Skip this scan. Detail: {fpe}")
     except Exception as e:
         print(f"[Polling Job Error] {e}")
         traceback.print_exc()
