@@ -44,6 +44,11 @@ FINANCE_REPORT_TASK_TYPES = {
 DEFAULT_DAILY_FINANCE_TASK_TYPE = "daily_finance_report"
 TASK_ACTIVE_STATUSES = {"active", "pending"}
 TASK_TERMINAL_STATUSES = {"completed", "failed", "disabled"}
+SUPPORTED_SCHEDULED_TASK_TYPES = (
+    FINANCE_REPORT_TASK_TYPES | EXTERNAL_BRIEF_TASK_TYPES
+)
+SCHEDULER_LOCK_MINUTES = 5
+SCHEDULER_MAX_RETRIES = 3
 
 
 def _get_tz(timezone_name: str = DEFAULT_TIMEZONE):
@@ -254,21 +259,26 @@ def get_delivery_state(uid: str, task_type: str, date_key: str) -> dict:
 
 def update_delivery_state(uid: str, task_type: str, date_key: str, **updates) -> None:
     db = firestore.client()
+    ref = _delivery_state_ref(db, uid, task_type, date_key)
+    existing = ref.get()
     payload = {
         "uid": uid,
         "task_type": task_type,
         "date_key": date_key,
-        "scheduled_time": updates.get("scheduled_time"),
-        "auto_send_done": False,
-        "manual_send_done": False,
-        "skip_auto_today": False,
-        "last_manual_at": None,
-        "last_auto_at": None,
-        "last_report_id": None,
         "updated_at": firestore.SERVER_TIMESTAMP,
     }
+    if not existing.exists:
+        payload.update({
+            "scheduled_time": updates.get("scheduled_time"),
+            "auto_send_done": False,
+            "manual_send_done": False,
+            "skip_auto_today": False,
+            "last_manual_at": None,
+            "last_auto_at": None,
+            "last_report_id": None,
+        })
     payload.update(updates)
-    _delivery_state_ref(db, uid, task_type, date_key).set(payload, merge=True)
+    ref.set(payload, merge=True)
 
 
 def should_skip_auto_delivery(uid: str, task_type: str, scheduled_time: str, now: datetime) -> bool:
@@ -1266,13 +1276,24 @@ def ensure_default_scheduled_tasks(db) -> None:
     for user_doc in db.collection("users").stream():
         user_data = user_doc.to_dict() or {}
         tg_config = user_data.get("telegramConfig") or {}
-        if not (tg_config.get("botToken") and tg_config.get("chatId")):
+        fcm_token = user_data.get("fcmToken") or user_data.get("fcm_token")
+        if not ((tg_config.get("botToken") and tg_config.get("chatId")) or fcm_token):
             continue
         uid = user_doc.id
         for task_type in sorted(EXTERNAL_BRIEF_TASK_TYPES):
             _create_default_task_if_missing(db, uid, task_type, DEFAULT_EXTERNAL_SEND_TIME)
         if not _user_has_custom_finance_task(db, uid):
             _create_default_task_if_missing(db, uid, DEFAULT_DAILY_FINANCE_TASK_TYPE, DEFAULT_FINANCE_SEND_TIME)
+
+
+def ensure_default_scheduled_tasks_job() -> None:
+    print(f"[Scheduler] ensure default tasks started: {datetime.now(tz=VN_TZ).strftime('%H:%M:%S')}")
+    db = firestore.client()
+    try:
+        ensure_default_scheduled_tasks(db)
+    except Exception as e:
+        print(f"[Scheduler] ensure default tasks failed: {e}")
+        traceback.print_exc()
 
 
 def _brief_prompt_for_task(task_type: str) -> str:
@@ -1314,7 +1335,7 @@ def generate_finance_report(uid: str, task_type: str) -> str:
     return chat_with_agentic_ai(query, uid) or "Chua tao duoc bao cao tai chinh luc nay."
 
 
-def send_manual_report(uid: str, task_type: str) -> str:
+def send_manual_report_previous(uid: str, task_type: str) -> str:
     db = firestore.client()
     user_doc = db.collection("users").document(uid).get()
     user_data = user_doc.to_dict() if user_doc.exists else {}
@@ -1475,7 +1496,7 @@ def poll_scheduled_tasks_job_legacy():
         print(f"[Polling Job Error] {e}")
         traceback.print_exc()
 
-def poll_scheduled_tasks_job():
+def poll_scheduled_tasks_job_previous():
     """Quet Firestore moi phut de thuc thi scheduled_tasks schema moi va task cu."""
     print(f"[Polling Job] scan due tasks: {datetime.now(tz=VN_TZ).strftime('%H:%M:%S')}")
     db = firestore.client()
@@ -1497,6 +1518,306 @@ def poll_scheduled_tasks_job():
         print(f"[Polling Job Error] Firestore index missing/building. Skip this scan. Detail: {fpe}")
     except Exception as e:
         print(f"[Polling Job Error] {e}")
+        traceback.print_exc()
+
+
+class NoDeliveryChannelError(Exception):
+    pass
+
+
+def _scheduler_now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _normalize_legacy_task(task: dict) -> dict:
+    normalized = dict(task or {})
+    task_type = _task_type_from_legacy(normalized)
+    normalized["task_type"] = task_type
+    normalized.setdefault("schedule_type", "once" if normalized.get("target_datetime") else "daily")
+    normalized.setdefault("timezone", DEFAULT_TIMEZONE)
+    normalized.setdefault(
+        "time",
+        DEFAULT_EXTERNAL_SEND_TIME if task_type in EXTERNAL_BRIEF_TASK_TYPES else DEFAULT_FINANCE_SEND_TIME,
+    )
+    normalized.setdefault("payload", {})
+    normalized.setdefault("retry_count", 0)
+    if not normalized.get("next_run_at") and normalized.get("target_datetime"):
+        normalized["next_run_at"] = normalized.get("target_datetime")
+    return normalized
+
+
+def _is_due_task(task: dict, now_utc: datetime) -> bool:
+    normalized = _normalize_legacy_task(task)
+    next_run = _coerce_datetime(normalized.get("next_run_at")) or _coerce_datetime(normalized.get("target_datetime"))
+    return bool(next_run and next_run <= now_utc)
+
+
+def _processing_lock_active(task: dict, now_utc: datetime) -> bool:
+    if (task.get("status") or "").lower() != "processing":
+        return False
+    lock_until = _coerce_datetime(task.get("processing_lock_until"))
+    return bool(lock_until and lock_until > now_utc)
+
+
+def _claim_scheduled_task(db, task_id: str, now_utc: datetime) -> Optional[dict]:
+    doc_ref = db.collection("scheduled_tasks").document(task_id)
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def _claim(transaction):
+        snap = doc_ref.get(transaction=transaction)
+        if not snap.exists:
+            return None
+        current = _normalize_legacy_task(snap.to_dict() or {})
+        status = (current.get("status") or "").lower()
+        if status in TASK_TERMINAL_STATUSES:
+            return {"_skip_reason": "terminal_status", **current}
+        if _processing_lock_active(current, now_utc):
+            return {"_skip_reason": "processing_lock_active", **current}
+        if status not in {"active", "pending", "processing"}:
+            return {"_skip_reason": "not_runnable_status", **current}
+        if not _is_due_task(current, now_utc):
+            return {"_skip_reason": "not_due", **current}
+
+        transaction.set(doc_ref, {
+            "status": "processing",
+            "task_type": current.get("task_type"),
+            "schedule_type": current.get("schedule_type"),
+            "timezone": current.get("timezone"),
+            "time": current.get("time"),
+            "next_run_at": current.get("next_run_at"),
+            "processing_started_at": now_utc,
+            "processing_lock_until": now_utc + timedelta(minutes=SCHEDULER_LOCK_MINUTES),
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        current["_previous_status"] = status
+        return current
+
+    return _claim(transaction)
+
+
+def _mark_task_failed(task_id: str, task_data: dict, failed_reason: str, terminal: bool = False) -> None:
+    db = firestore.client()
+    normalized = _normalize_legacy_task(task_data)
+    retry_count = int(normalized.get("retry_count", 0) or 0)
+    next_retry_count = retry_count + 1
+    should_terminal = terminal or next_retry_count >= SCHEDULER_MAX_RETRIES
+    schedule_type = normalized.get("schedule_type")
+    retry_status = "pending" if schedule_type == "once" else "active"
+    update = {
+        "status": "failed" if should_terminal else retry_status,
+        "retry_count": next_retry_count,
+        "failed_reason": failed_reason,
+        "last_failed_at": firestore.SERVER_TIMESTAMP,
+        "processing_lock_until": None,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    if not should_terminal:
+        update["next_run_at"] = _scheduler_now_utc() + timedelta(minutes=min(30, 2 ** min(next_retry_count, 5)))
+    db.collection("scheduled_tasks").document(task_id).set(update, merge=True)
+
+
+def _mark_task_success(task_id: str, task_data: dict, now_utc: datetime) -> None:
+    db = firestore.client()
+    normalized = _normalize_legacy_task(task_data)
+    schedule_type = (normalized.get("schedule_type") or "once").lower()
+    update = {
+        "last_run_at": now_utc,
+        "last_success_at": now_utc,
+        "retry_count": 0,
+        "failed_reason": None,
+        "processing_lock_until": None,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    if schedule_type == "once":
+        update["status"] = "completed"
+    else:
+        update["status"] = "active"
+        update["next_run_at"] = calculate_next_run_at(normalized, now_utc + timedelta(seconds=1))
+    db.collection("scheduled_tasks").document(task_id).set(update, merge=True)
+
+
+def send_report_to_user(uid: str, title: str, content: str, payload: Optional[dict] = None) -> dict:
+    db = firestore.client()
+    user_doc = db.collection("users").document(uid).get()
+    if not user_doc.exists:
+        raise NoDeliveryChannelError("user_not_found")
+
+    user_data = user_doc.to_dict() or {}
+    tg_config = user_data.get("telegramConfig") or {}
+    bot_token = tg_config.get("botToken")
+    chat_id = tg_config.get("chatId")
+    fcm_token = user_data.get("fcmToken") or user_data.get("fcm_token")
+
+    sent = {"telegram": False, "fcm": False}
+    errors = {}
+    if bot_token and chat_id:
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            resp = requests.post(url, json={"chat_id": chat_id, "text": f"{title}\n\n{content}"}, timeout=10)
+            if resp.status_code != 200:
+                raise RuntimeError(f"{resp.status_code}:{resp.text[:120]}")
+            sent["telegram"] = True
+        except Exception as e:
+            errors["telegram"] = str(e)
+
+    if fcm_token:
+        try:
+            msg = messaging.Message(
+                notification=messaging.Notification(
+                    title=title,
+                    body=content[:150] + ("..." if len(content) > 150 else ""),
+                ),
+                data={
+                    "type": "SCHEDULED_REPORT",
+                    "task_type": str((payload or {}).get("task_type", "")),
+                },
+                android=messaging.AndroidConfig(priority="high"),
+                token=fcm_token,
+            )
+            messaging.send(msg)
+            sent["fcm"] = True
+        except Exception as e:
+            errors["fcm"] = str(e)
+
+    if not any(sent.values()):
+        if errors:
+            raise RuntimeError(f"delivery_failed:{errors}")
+        raise NoDeliveryChannelError("no_delivery_channel")
+    if errors:
+        print(f"[Scheduler] partial delivery uid={uid} sent={sent} errors={errors}")
+    return sent
+
+
+def send_manual_report(uid: str, task_type: str) -> str:
+    if task_type in EXTERNAL_BRIEF_TASK_TYPES:
+        content = generate_external_brief(task_type)
+        scheduled_time = DEFAULT_EXTERNAL_SEND_TIME
+        now = get_vn_now()
+        hour, minute = _parse_hhmm(scheduled_time, DEFAULT_EXTERNAL_SEND_TIME)
+        skip_auto = now < now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        title = "Bao cao du lieu ngoai"
+    else:
+        content = generate_finance_report(uid, task_type)
+        scheduled_time = DEFAULT_FINANCE_SEND_TIME
+        skip_auto = False
+        title = "Bao cao tai chinh"
+
+    mark_manual_report_delivery(uid, task_type, scheduled_time, skip_auto_today=skip_auto)
+    send_report_to_user(uid, title, content, {"task_type": task_type, "delivery_mode": "manual"})
+    print(f"[Scheduler] manual report sent uid={uid} type={task_type} skip_auto_today={skip_auto}")
+    return content
+
+
+def _scheduled_report_content(uid: str, task_type: str, payload: dict) -> tuple[str, str]:
+    if task_type in EXTERNAL_BRIEF_TASK_TYPES:
+        return "Bao cao du lieu ngoai", generate_external_brief(task_type)
+    if task_type in FINANCE_REPORT_TASK_TYPES:
+        return "Bao cao tai chinh", generate_finance_report(uid, task_type)
+    raise ValueError("unsupported_task_type")
+
+
+def _mark_auto_delivery(uid: str, task_type: str, task_id: str, scheduled_time: str, now_utc: datetime) -> None:
+    date_key = get_date_key(now_utc, DEFAULT_TIMEZONE)
+    state = get_delivery_state(uid, task_type, date_key)
+    update_delivery_state(
+        uid,
+        task_type,
+        date_key,
+        scheduled_time=scheduled_time,
+        auto_send_done=True,
+        manual_send_done=state.get("manual_send_done", False),
+        skip_auto_today=state.get("skip_auto_today", False),
+        last_auto_at=firestore.SERVER_TIMESTAMP,
+        last_report_id=task_id,
+    )
+
+
+def execute_scheduled_task(task_id: str, task_data: dict) -> dict:
+    db = firestore.client()
+    now_utc = _scheduler_now_utc()
+    claimed = _claim_scheduled_task(db, task_id, now_utc)
+    if not claimed:
+        print(f"[Scheduler] task skipped id={task_id} reason=not_found")
+        return {"status": "skipped", "reason": "not_found"}
+
+    skip_reason = claimed.get("_skip_reason")
+    if skip_reason:
+        print(f"[Scheduler] task skipped id={task_id} reason={skip_reason}")
+        return {"status": "skipped", "reason": skip_reason}
+
+    task = _normalize_legacy_task(claimed)
+    uid = task.get("uid")
+    task_type = task.get("task_type")
+    scheduled_time = task.get("time") or DEFAULT_FINANCE_SEND_TIME
+    payload = task.get("payload") or {}
+
+    try:
+        if not uid:
+            raise ValueError("missing_uid")
+        if task_type not in SUPPORTED_SCHEDULED_TASK_TYPES:
+            _mark_task_failed(task_id, task, "unsupported_task_type", terminal=True)
+            print(f"[Scheduler] task failed id={task_id} reason=unsupported_task_type")
+            return {"status": "failed", "reason": "unsupported_task_type"}
+
+        if should_skip_auto_delivery(uid, task_type, scheduled_time, now_utc):
+            _mark_task_success(task_id, task, now_utc)
+            print(f"[Scheduler] task skipped due delivery_state id={task_id} uid={uid} type={task_type}")
+            return {"status": "skipped", "reason": "delivery_state"}
+
+        title, content = _scheduled_report_content(uid, task_type, payload)
+        send_result = send_report_to_user(uid, title, content, {"task_type": task_type, **payload})
+        _mark_auto_delivery(uid, task_type, task_id, scheduled_time, now_utc)
+        _mark_task_success(task_id, task, now_utc)
+        print(f"[Scheduler] task success id={task_id} uid={uid} type={task_type} sent={send_result}")
+        return {"status": "success", "sent": send_result}
+    except NoDeliveryChannelError as e:
+        reason = str(e) or "no_delivery_channel"
+        _mark_task_failed(task_id, task, reason, terminal=True)
+        print(f"[Scheduler] task failed id={task_id} uid={uid} type={task_type} reason={reason}")
+        return {"status": "failed", "reason": reason}
+    except Exception as e:
+        reason = str(e)[:300] or e.__class__.__name__
+        _mark_task_failed(task_id, task, reason, terminal=False)
+        print(f"[Scheduler] task failed id={task_id} uid={uid} type={task_type} reason={reason}")
+        traceback.print_exc()
+        return {"status": "failed", "reason": reason}
+
+
+def _collect_due_scheduled_tasks(db, now_utc: datetime) -> list[tuple[str, dict]]:
+    due_tasks: list[tuple[str, dict]] = []
+    seen_ids = set()
+    for status in ("active", "pending", "processing"):
+        for doc in db.collection("scheduled_tasks").where(filter=FieldFilter("status", "==", status)).stream():
+            if doc.id in seen_ids:
+                continue
+            seen_ids.add(doc.id)
+            task = doc.to_dict() or {}
+            if status == "processing" and _processing_lock_active(task, now_utc):
+                print(f"[Scheduler] task skipped due active lock id={doc.id}")
+                continue
+            if _is_due_task(task, now_utc):
+                due_tasks.append((doc.id, task))
+    return due_tasks
+
+
+def poll_scheduled_tasks_job():
+    """Task dispatcher entrypoint called by APScheduler every minute."""
+    db = firestore.client()
+    now_utc = _scheduler_now_utc()
+    try:
+        due_tasks = _collect_due_scheduled_tasks(db, now_utc)
+        print(f"[Scheduler] due task count={len(due_tasks)} at={now_utc.isoformat()}")
+        for task_id, task_data in due_tasks:
+            try:
+                execute_scheduled_task(task_id, task_data)
+            except Exception as task_error:
+                print(f"[Scheduler] unexpected task crash id={task_id}: {task_error}")
+                traceback.print_exc()
+    except FailedPrecondition as fpe:
+        print(f"[Scheduler] Firestore index missing/building. Skip scan. Detail: {fpe}")
+    except Exception as e:
+        print(f"[Scheduler] polling batch failed: {e}")
         traceback.print_exc()
 
 # -------------- DYNAMIC BUDGETING & PROACTIVE ALERTS --------------
