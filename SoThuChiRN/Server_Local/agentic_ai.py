@@ -65,6 +65,14 @@ SCHEDULER_LOCK_MINUTES = 5
 SCHEDULER_MAX_RETRIES = 3
 
 
+def _finance_report_title(task_type: str, timeframe: str) -> str:
+    if timeframe == "current_week":
+        return "Bao cao tai chinh tuan nay" if task_type != "expense_report" else "Bao cao chi tieu tuan nay"
+    if timeframe == "current_month":
+        return "Bao cao tai chinh thang nay" if task_type != "expense_report" else "Bao cao chi tieu thang nay"
+    return FINANCE_REPORT_TITLES.get(task_type, "Bao cao tai chinh")
+
+
 def _get_tz(timezone_name: str = DEFAULT_TIMEZONE):
     if ZoneInfo:
         try:
@@ -335,6 +343,30 @@ def mark_manual_report_delivery(uid: str, task_type: str, scheduled_time: str, s
     )
 
 
+def _should_skip_default_finance_after_manual(uid: str, task_type: str, now: datetime) -> bool:
+    db = firestore.client()
+    for snap in db.collection("scheduled_tasks").where(filter=FieldFilter("uid", "==", uid)).stream():
+        task = snap.to_dict() or {}
+        if task.get("status") not in TASK_ACTIVE_STATUSES:
+            continue
+        if task.get("schedule_type") != "default_daily":
+            continue
+        if _task_type_from_legacy(task) != task_type:
+            continue
+
+        payload = task.get("payload") or {}
+        if not payload.get("skip_default_if_manual_before_scheduled", False):
+            return False
+
+        timezone_name = task.get("timezone") or DEFAULT_TIMEZONE
+        tz = _get_tz(timezone_name)
+        local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
+        hour, minute = _parse_hhmm(task.get("time"), DEFAULT_FINANCE_SEND_TIME)
+        scheduled_at = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return local_now < scheduled_at
+    return False
+
+
 def _normalize_schedule_type(value: Optional[str], report_type: str = "daily_finance_report") -> str:
     key = (value or "").strip().lower()
     if key in {"daily", "weekly", "monthly", "once"}:
@@ -373,6 +405,14 @@ def _parse_user_time(value: Optional[str], fallback: str = DEFAULT_FINANCE_SEND_
 
 def _finance_default_task_ref(db, uid: str):
     return db.collection("scheduled_tasks").document(_default_task_id(uid, DEFAULT_DAILY_FINANCE_TASK_TYPE))
+
+
+def _default_finance_report_payload() -> dict:
+    return {
+        "timeframe": "today",
+        "delivery": ["telegram", "fcm"],
+        "skip_default_if_manual_before_scheduled": False,
+    }
 
 
 def disable_default_finance_report_task_for_user(uid: str) -> None:
@@ -469,17 +509,10 @@ def create_custom_finance_report_task(uid: str, user_time: str, schedule_type: s
         "payload": {
             "timeframe": normalized_timeframe,
             "created_by_user": True,
-            "delivery": ["telegram", "fcm"],
         },
         "created_at": firestore.SERVER_TIMESTAMP,
         "updated_at": firestore.SERVER_TIMESTAMP,
     }
-    if task_type == DEFAULT_DAILY_FINANCE_TASK_TYPE:
-        task["payload"] = {
-            "timeframe": "today",
-            "delivery": ["telegram", "fcm"],
-            "skip_default_if_manual_before_scheduled": False,
-        }
     task["next_run_at"] = calculate_next_run_at(task, now_utc)
     doc_id = f"{uid}_{task_type}_{normalized_schedule}_{normalized_time.replace(':', '')}_custom"
     db.collection("scheduled_tasks").document(doc_id).set(task, merge=True)
@@ -1575,6 +1608,12 @@ def _default_task_exists(db, uid: str, task_type: str, send_time: str) -> bool:
             and task.get("time") == send_time
             and task.get("status") == "active"
         ):
+            if task_type == DEFAULT_DAILY_FINANCE_TASK_TYPE:
+                snap.reference.set({
+                    "payload": _default_finance_report_payload(),
+                    "timezone": DEFAULT_TIMEZONE,
+                    "updated_at": firestore.SERVER_TIMESTAMP,
+                }, merge=True)
             return True
     return False
 
@@ -1603,7 +1642,7 @@ def _create_default_task_if_missing(db, uid: str, task_type: str, send_time: str
         "last_run_at": None,
         "last_success_at": None,
         "retry_count": 0,
-        "payload": {"source": "system_default", "skip_default_if_manual_before_scheduled": False},
+        "payload": _default_finance_report_payload() if task_type == DEFAULT_DAILY_FINANCE_TASK_TYPE else {"source": "system_default"},
         "created_at": firestore.SERVER_TIMESTAMP,
         "updated_at": firestore.SERVER_TIMESTAMP,
     }
@@ -1624,7 +1663,7 @@ def _user_has_custom_finance_task(db, uid: str) -> bool:
             continue
         if task.get("schedule_type") == "default_daily":
             continue
-        if _task_type_from_legacy(task) in {"expense_report", "daily_finance_report"}:
+        if _task_type_from_legacy(task) in FINANCE_REPORT_TASK_TYPES:
             return True
     return False
 
@@ -1824,14 +1863,30 @@ def create_and_send_external_report(uid: str, task_type: str, delivery_mode: str
 def generate_finance_report(uid: str, timeframe: str = "today", mode: str = "scheduled", task_type: str = DEFAULT_DAILY_FINANCE_TASK_TYPE) -> str:
     data = _build_finance_report_data(uid, timeframe)
     comment = _ai_finance_comment(data, mode)
-    return _render_finance_report_content(data, comment)
+    content = _render_finance_report_content(data, comment)
+    title = _finance_report_title(task_type, timeframe)
+    report_id = build_finance_report_id(uid, task_type, timeframe, data["date_key"], mode)
+    save_finance_report(
+        uid,
+        report_id,
+        task_type,
+        timeframe,
+        data["date_key"],
+        mode,
+        title,
+        content,
+        data,
+        "generated",
+        {"task_type": task_type, "timeframe": timeframe, "delivery_mode": mode},
+    )
+    return content
 
 
 def create_and_send_finance_report(uid: str, task_type: str, timeframe: str, delivery_mode: str, payload: Optional[dict] = None) -> tuple[str, dict, str]:
     data = _build_finance_report_data(uid, timeframe)
     comment = _ai_finance_comment(data, delivery_mode)
     content = _render_finance_report_content(data, comment)
-    title = FINANCE_REPORT_TITLES.get(task_type, "Bao cao tai chinh")
+    title = _finance_report_title(task_type, timeframe)
     date_key = data["date_key"]
     report_id = build_finance_report_id(uid, task_type, timeframe, date_key, delivery_mode)
     report_payload = {"task_type": task_type, "timeframe": timeframe, "delivery_mode": delivery_mode, **(payload or {})}
@@ -2252,10 +2307,11 @@ def send_manual_report(uid: str, task_type: str) -> str:
         {"source": "manual_report"},
     )
     scheduled_time = DEFAULT_FINANCE_SEND_TIME
-    mark_manual_report_delivery(uid, task_type, scheduled_time, skip_auto_today=False)
+    skip_auto_today = _should_skip_default_finance_after_manual(uid, task_type, get_vn_now())
+    mark_manual_report_delivery(uid, task_type, scheduled_time, skip_auto_today=skip_auto_today)
     date_key = get_date_key(get_vn_now(), DEFAULT_TIMEZONE)
     update_delivery_state(uid, task_type, date_key, last_report_id=report_id)
-    print(f"[Scheduler] manual report sent uid={uid} type={task_type} skip_auto_today=False")
+    print(f"[Scheduler] manual report sent uid={uid} type={task_type} skip_auto_today={skip_auto_today}")
     return content
 
 

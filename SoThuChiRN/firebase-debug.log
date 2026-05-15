@@ -1,0 +1,22 @@
+[debug] [2026-05-15T14:32:42.325Z] ----------------------------------------------------------------------
+[debug] [2026-05-15T14:32:42.326Z] Command:       D:\Node\node.exe C:\Users\GuChu\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\firebase-tools\lib\bin\firebase.js use
+[debug] [2026-05-15T14:32:42.327Z] CLI Version:   15.18.0
+[debug] [2026-05-15T14:32:42.327Z] Platform:      win32
+[debug] [2026-05-15T14:32:42.327Z] Node Version:  v20.20.2
+[debug] [2026-05-15T14:32:42.327Z] Time:          Fri May 15 2026 21:32:42 GMT+0700 (Giờ Đông Dương)
+[debug] [2026-05-15T14:32:42.327Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-05-15T14:32:42.472Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-05-15T14:32:42.473Z] > authorizing via signed-in user (hoangsonciputra@gmail.com)
+[info] sothuchi-53e1c
+[debug] [2026-05-15T14:39:47.154Z] ----------------------------------------------------------------------
+[debug] [2026-05-15T14:39:47.156Z] Command:       D:\Node\node.exe C:\Users\GuChu\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\firebase-tools\lib\bin\firebase.js use
+[debug] [2026-05-15T14:39:47.156Z] CLI Version:   15.18.0
+[debug] [2026-05-15T14:39:47.156Z] Platform:      win32
+[debug] [2026-05-15T14:39:47.156Z] Node Version:  v20.20.2
+[debug] [2026-05-15T14:39:47.156Z] Time:          Fri May 15 2026 21:39:47 GMT+0700 (Giờ Đông Dương)
+[debug] [2026-05-15T14:39:47.156Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-05-15T14:39:47.316Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-05-15T14:39:47.317Z] > authorizing via signed-in user (hoangsonciputra@gmail.com)
+[info] sothuchi-53e1c

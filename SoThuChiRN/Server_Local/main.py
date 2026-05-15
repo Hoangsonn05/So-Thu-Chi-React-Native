@@ -178,7 +178,16 @@ def process_agentic_query(bot_token: str, firebase_uid: str, chat_id: int, text:
             hour = int(schedule_match.group(1))
             minute = int(schedule_match.group(2) or 0)
             report_type = "expense_report" if "chi tieu" in intent_text else "daily_finance_report"
-            result = create_custom_finance_report_task(firebase_uid, f"{hour:02d}:{minute:02d}", "daily", report_type, "today")
+            if any(k in intent_text for k in ["moi thang", "hang thang", "thang", "monthly"]):
+                schedule_type = "monthly"
+                timeframe = "current_month"
+            elif any(k in intent_text for k in ["moi tuan", "hang tuan", "tuan", "weekly"]):
+                schedule_type = "weekly"
+                timeframe = "current_week"
+            else:
+                schedule_type = "daily"
+                timeframe = "today"
+            result = create_custom_finance_report_task(firebase_uid, f"{hour:02d}:{minute:02d}", schedule_type, report_type, timeframe)
             send_telegram_message(bot_token, chat_id, json.loads(result).get("message", "Da len lich bao cao."))
             return
         manual_task_type = _detect_manual_report_task_type(text)

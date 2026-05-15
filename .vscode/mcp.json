@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "firebase": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "firebase-tools@latest",
+        "mcp",
+        "--dir",
+        "D:/Project_android_studio/So-Thu-Chi-React/SoThuChiRN"
+      ]
+    }
+  }
+}
