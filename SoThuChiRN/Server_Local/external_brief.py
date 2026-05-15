@@ -126,6 +126,18 @@ def _format_fuel(snapshot: dict) -> list[str]:
         lines.append(f"Thời điểm áp dụng: {_source_time(first, snapshot)}")
     if len(items) > len(shown):
         lines.append(f"... và {len(items) - len(shown)} mục khác đã lưu trong snapshot.")
+    fuel_note_text = " ".join(snapshot.get("warnings") or [])
+    if snapshot.get("used_cached_article"):
+        if "snapshot" in fuel_note_text.lower() and ("chưa" in fuel_note_text.lower() or "chua" in fuel_note_text.lower()):
+            lines.append("Ghi ch\u00fa: d\u00f9ng d\u1eef li\u1ec7u t\u1eeb b\u00e0i Petrolimex g\u1ea7n nh\u1ea5t v\u00ec ch\u01b0a c\u00f3 b\u00e0i \u0111i\u1ec1u ch\u1ec9nh m\u1edbi.")
+        else:
+            lines.append("Ghi ch\u00fa: d\u00f9ng cache g\u1ea7n nh\u1ea5t v\u00ec ngu\u1ed3n hi\u1ec7n t\u1ea1i l\u1ed7i.")
+        return lines
+    warnings = " ".join(snapshot.get("warnings") or [])
+    if snapshot.get("used_cached_article") and "chÆ°a thay Ä‘á»•i" in warnings:
+        lines.append("Ghi chÃº: dÃ¹ng dá»¯ liá»‡u tá»« bÃ i Petrolimex gáº§n nháº¥t vÃ¬ chÆ°a cÃ³ bÃ i Ä‘iá»u chá»‰nh má»›i.")
+    elif snapshot.get("used_cached_article"):
+        lines.append("Ghi chÃº: dÃ¹ng cache gáº§n nháº¥t vÃ¬ nguá»“n hiá»‡n táº¡i lá»—i.")
     return lines
 
 

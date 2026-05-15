@@ -32,6 +32,10 @@ def get_external_snapshot(topic: str, date_key: str, reportable_only: bool = Fal
     return data
 
 
+def get_today_snapshot(topic: str, date_key: str, reportable_only: bool = False) -> dict:
+    return get_external_snapshot(topic, date_key, reportable_only=reportable_only)
+
+
 def _date_keys_before(before_date_key: str, max_days: int) -> list[str]:
     try:
         current = datetime.strptime(before_date_key, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -44,6 +48,27 @@ def find_recent_snapshot(topic: str, before_date_key: str, max_days: int = 14, r
     for date_key in _date_keys_before(before_date_key, max_days):
         snapshot = get_external_snapshot(topic, date_key, reportable_only=reportable_only)
         if snapshot:
+            return snapshot
+    return None
+
+
+def get_latest_valid_snapshot(topic: str, before_date_key: Optional[str] = None, max_days: int = 60) -> Optional[dict]:
+    if before_date_key is None:
+        before_date_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = get_external_snapshot(topic, before_date_key, reportable_only=True)
+    if today:
+        return today
+    return find_recent_snapshot(topic, before_date_key, max_days=max_days, reportable_only=True)
+
+
+def find_snapshot_by_discovered_article_url(topic: str, article_url: str, before_date_key: Optional[str] = None, max_days: int = 90) -> Optional[dict]:
+    if not article_url:
+        return None
+    if before_date_key is None:
+        before_date_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for date_key in [before_date_key, *_date_keys_before(before_date_key, max_days)]:
+        snapshot = get_external_snapshot(topic, date_key, reportable_only=True)
+        if snapshot.get("discovered_article_url") == article_url:
             return snapshot
     return None
 
@@ -95,7 +120,14 @@ def build_item_history(topic: str, items: list[dict], previous_snapshot: Optiona
     return history
 
 
-def save_external_snapshot(snapshot: dict) -> dict:
+def save_external_snapshot(snapshot: dict | str, date_key: Optional[str] = None, data: Optional[dict] = None) -> dict:
+    if isinstance(snapshot, str):
+        payload_input = dict(data or {})
+        payload_input["topic"] = snapshot
+        if date_key:
+            payload_input["date_key"] = date_key
+        snapshot = payload_input
+
     db = firestore.client()
     topic = snapshot.get("topic")
     date_key = snapshot.get("date_key")
@@ -122,6 +154,15 @@ def save_external_snapshot(snapshot: dict) -> dict:
         "errors": snapshot.get("errors") or ([] if not snapshot.get("error") else [snapshot.get("error")]),
         "warnings": snapshot.get("warnings") or [],
         "tried_sources": snapshot.get("tried_sources") or [],
+        "discovered_article_title": snapshot.get("discovered_article_title"),
+        "discovered_article_url": snapshot.get("discovered_article_url"),
+        "discovered_article_published_date": snapshot.get("discovered_article_published_date"),
+        "effective_time": snapshot.get("effective_time"),
+        "content_hash": snapshot.get("content_hash"),
+        "discovery_hash": snapshot.get("discovery_hash"),
+        "last_discovered_at": snapshot.get("last_discovered_at"),
+        "last_parsed_at": snapshot.get("last_parsed_at"),
+        "used_cached_article": bool(snapshot.get("used_cached_article")),
         "summary": snapshot.get("summary") or "",
         "confidence": float(snapshot.get("confidence") or 0),
         "raw_hash": snapshot.get("raw_hash"),

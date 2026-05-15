@@ -4,11 +4,13 @@ import re
 from datetime import datetime, timedelta, timezone
 from html import unescape
 from typing import Callable, Optional
+from urllib.parse import urljoin
 
 import requests
 
 from external_cache import (
     find_recent_snapshot,
+    get_latest_valid_snapshot,
     get_external_snapshot,
     is_reportable_snapshot,
     save_external_snapshot,
@@ -157,7 +159,8 @@ def _strip_accents(text: str) -> str:
         import unicodedata
 
         normalized = unicodedata.normalize("NFD", text or "")
-        return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+        stripped = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+        return stripped.replace("đ", "d").replace("Đ", "D")
     except Exception:
         return text or ""
 
@@ -312,7 +315,8 @@ def _to_int_vnd(value: str) -> Optional[int]:
     raw = (value or "").strip()
     if not raw:
         return None
-    cleaned = re.sub(r"[^\d.,]", "", raw)
+    cleaned = re.sub(r"[^\d.,\s]", "", raw)
+    cleaned = re.sub(r"(?<=\d)\s+(?=\d)", "", cleaned)
     if not cleaned:
         return None
     if "," in cleaned and "." in cleaned:
@@ -427,6 +431,7 @@ def parse_gold_items(text: str, source_name: str, source_time: Optional[str] = N
         if not _line_has_unit(line, ["chi", "luong", "cay", "1.000 vnd", "1000 vnd"]):
             rejects.append(f"{name}:missing_unit")
             continue
+            unit = "VND/lÃ­t"
         numbers = re.findall(r"\d+(?:[.,]\d+)*", line)
         values = [_gold_value_to_per_chi(num, line) for num in numbers]
         values = [value for value in values if value is not None]
@@ -465,11 +470,11 @@ def _fuel_name(line: str) -> Optional[str]:
         return "RON95-III"
     if "e5" in normalized and ("ron92" in normalized or "ron 92" in normalized):
         return "E5 RON92-II"
-    if "diesel" in normalized or "do 0.05" in normalized:
+    if "diesel" in normalized or "do 0.05" in normalized or "do 0,05" in normalized:
         return "Diesel DO 0.05S"
-    if "dau hoa" in normalized or "2-k" in normalized:
+    if "dau hoa" in normalized or "2-k" in normalized or re.search(r"\bko\b", normalized):
         return "Dầu hỏa 2-K"
-    if "mazut" in normalized:
+    if "mazut" in normalized or re.search(r"\bfo\b", normalized):
         return "Mazut"
     return None
 
@@ -487,6 +492,11 @@ def _validate_fuel_item(item: dict) -> tuple[bool, str]:
     price = item.get("price")
     unit = item.get("unit")
     name = _norm(item.get("name", ""))
+    if isinstance(unit, str) and unit.startswith("VND/l"):
+        unit = "VND/lÃ­t"
+        item["unit"] = unit
+        unit = "VND/lít"
+        item["unit"] = unit
     if not isinstance(price, int):
         return False, "missing_price"
     if unit not in {"VND/lít", "VND/kg"}:
@@ -499,10 +509,29 @@ def _validate_fuel_item(item: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def _extract_effective_time(text: str) -> Optional[str]:
+    for pattern in [
+        r"(?:từ|tu)\s*(\d{1,2})\s*giờ(?:\s*(\d{1,2})\s*phút)?\s*ngày\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})",
+        r"(\d{1,2}):(\d{2})\s*ngày\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})",
+    ]:
+        match = re.search(pattern, text or "", re.I)
+        if match:
+            hour, minute, day, month, year = match.groups()
+            return f"{int(hour):02d}:{int(minute or 0):02d} {int(day):02d}/{int(month):02d}/{year}"
+    match = re.search(r"kể từ\s*(\d{1,2})\s*giờ(?:\s*(\d{1,2})\s*phút)?", text or "", re.I)
+    if match:
+        return f"{int(match.group(1)):02d}:{int(match.group(2) or 0):02d}"
+    return None
+
+
 def parse_fuel_items(text: str, source_name: str, source_time: Optional[str] = None) -> tuple[list[dict], list[str]]:
     by_name: dict[str, dict] = {}
     rejects = []
-    for line in _html_to_lines(text):
+    lines = _html_to_lines(text)
+    global_context = _norm(" ".join(lines))
+    has_global_liter_unit = any(token in global_context for token in ["dong/lit", "vnd/lit", "dong/l", "vnd/l"])
+    has_global_kg_unit = any(token in global_context for token in ["dong/kg", "vnd/kg"])
+    for line in lines:
         name = _fuel_name(line)
         if not name:
             continue
@@ -512,7 +541,12 @@ def parse_fuel_items(text: str, source_name: str, source_time: Optional[str] = N
             unit = "VND/kg"
         elif "lit" in normalized or "lít" in line.lower() or "l/" in normalized:
             unit = "VND/lít"
-        numbers = re.findall(r"\d+(?:[.,]\d+)*", line)
+        if not unit and name == "Mazut" and has_global_kg_unit:
+            unit = "VND/kg"
+        elif not unit and has_global_liter_unit:
+            unit = "VND/lÃ­t"
+        price_line = re.sub(r"(?i)(vÃ¹ng|vùng|vung)\s*\d+", " ", line)
+        numbers = re.findall(r"\d{1,3}(?:[.,\s]\d{3})+|\d{5}", price_line)
         prices = [_to_int_vnd(num) for num in numbers]
         prices = [price for price in prices if price is not None]
         if not unit or not prices:
@@ -533,7 +567,7 @@ def parse_fuel_items(text: str, source_name: str, source_time: Optional[str] = N
         ok, reason = _validate_fuel_item(item)
         if not ok:
             rejects.append(f"{name}:{reason}")
-            print(f"[External Collector] reject fuel reason={reason} line={line[:120]}")
+            print(f"[External Collector] reject fuel reason={reason} line={_strip_accents(line)[:120]}")
             continue
         current = by_name.get(name)
         if not current or item.get("region") == "vùng 1":
@@ -541,6 +575,29 @@ def parse_fuel_items(text: str, source_name: str, source_time: Optional[str] = N
     items = list(by_name.values())
     print(f"[External Collector] parser=fuel items={len(items)} rejects={len(rejects)}")
     return items, rejects
+
+
+def parse_petrolimex_fuel_article(html: str, source_url: str) -> dict:
+    effective_time = _extract_effective_time(_compact_text(html, RAW_TEXT_LIMIT * 2)) or _source_time_from_text(html)
+    items, rejects = parse_fuel_items(html, "Petrolimex", effective_time)
+    for item in items:
+        item["source_url"] = source_url
+        item["source_name"] = "Petrolimex"
+        item["effective_time"] = effective_time
+        item["source_time"] = effective_time
+    compact = _compact_text(html, RAW_TEXT_LIMIT)
+    return {
+        "source_name": "Petrolimex",
+        "source_url": source_url,
+        "effective_time": effective_time,
+        "source_time": effective_time,
+        "items": items,
+        "errors": [] if items else ["petrolimex_article_no_valid_items"],
+        "warnings": rejects,
+        "content_hash": _hash_text(compact),
+        "raw_hash": _hash_text(compact),
+        "raw_text_short": compact,
+    }
 
 
 def _validate_usd_rate(value: Optional[int]) -> bool:
@@ -706,6 +763,62 @@ def _source_time_from_text(text: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _parse_article_date(text: str) -> Optional[datetime]:
+    match = re.search(r"(\d{1,2})[./-](\d{1,2})[./-](\d{4})", text or "")
+    if not match:
+        return None
+    day, month, year = match.groups()
+    try:
+        return datetime(int(year), int(month), int(day), tzinfo=VN_TZ)
+    except Exception:
+        return None
+
+
+def _fuel_article_score(title: str) -> int:
+    normalized = _norm(title)
+    strong_keywords = ["dieu chinh gia xang dau", "gia xang dau", "xang dau tu", "ron95", "e5 ron92", "diesel"]
+    excludes = ["nhan su", "hoi nghi", "co dong", "moi truong", "hang khong", "canh bao lua dao", "tuyen dung"]
+    if any(word in normalized for word in excludes):
+        return -100
+    score = 0
+    for idx, keyword in enumerate(strong_keywords):
+        if keyword in normalized:
+            score += 20 - idx
+    return score
+
+
+def discover_latest_petrolimex_fuel_article(list_url: str = "https://www.petrolimex.com.vn/nd/gia-xang-dau.html") -> Optional[dict]:
+    html, _status = _fetch_text(list_url)
+    link_pattern = re.compile(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.I | re.S)
+    links = []
+    for href, raw_title in link_pattern.findall(html or ""):
+        title = re.sub(r"\s+", " ", re.sub(r"(?is)<[^>]+>", " ", unescape(raw_title))).strip()
+        if not title:
+            continue
+        links.append({"title": title, "url": urljoin(list_url, href), "published_dt": _parse_article_date(title)})
+    candidates = []
+    for link in links:
+        score = _fuel_article_score(link["title"])
+        if score <= 0:
+            continue
+        candidates.append({**link, "score": score})
+    print(f"[External Collector] petrolimex discovery links={len(links)} candidates={len(candidates)}")
+    if not candidates:
+        return None
+    dated = [candidate for candidate in candidates if candidate.get("published_dt")]
+    selected = max(dated, key=lambda item: (item["published_dt"], item["score"])) if dated else max(candidates, key=lambda item: item["score"])
+    published = selected["published_dt"].strftime("%d/%m/%Y") if selected.get("published_dt") else None
+    safe_title = _strip_accents(selected["title"]).encode("ascii", errors="ignore").decode("ascii")[:100]
+    print(f"[External Collector] selected fuel article title={safe_title} url={selected['url']}")
+    return {
+        "title": selected["title"],
+        "url": selected["url"],
+        "published_date": published,
+        "source_name": "Petrolimex",
+        "source_url": list_url,
+    }
+
+
 def _collect_from_sources(topic: str, sources: list[tuple[str, str]], parser: Callable[[str, str, Optional[str]], tuple[list[dict], list[str]]], force_refresh: bool) -> dict:
     date_key = _date_key()
     cached = _cached_or_none(topic, date_key, force_refresh)
@@ -754,26 +867,111 @@ def collect_gold_price(force_refresh: bool = False) -> dict:
 
 
 def collect_fuel_price(force_refresh: bool = False) -> dict:
-    sources: list[tuple[str, str]] = []
-    primary = (os.getenv("EXTERNAL_FUEL_URL") or "").strip()
-    if primary:
-        sources.append((_friendly_source_name(primary), primary))
-    for name, url in DEFAULT_FUEL_URLS:
-        sources.append((name, url))
-    backup = os.getenv("EXTERNAL_FUEL_BACKUP_URLS") or ""
-    for url in re.split(r"[\n,|]+", backup):
-        url = url.strip()
-        if url:
-            sources.append((_friendly_source_name(url), url))
-    deduped = []
-    seen = set()
-    for name, url in sources:
-        if url in seen:
-            continue
-        seen.add(url)
-        deduped.append((name, url))
-    sources = deduped
-    return _collect_from_sources("fuel", sources, parse_fuel_items, force_refresh)
+    date_key = _date_key()
+    cached_today = _cached_or_none("fuel", date_key, force_refresh)
+    if cached_today:
+        print(f"[External Collector] fuel cache hit today date={date_key}")
+        return cached_today
+
+    configured_fuel_url = (os.getenv("EXTERNAL_FUEL_URL") or "").strip()
+    if configured_fuel_url and "petrolimex.com.vn/nd/gia-xang-dau" not in configured_fuel_url:
+        direct_result = _collect_from_sources(
+            "fuel",
+            [(_friendly_source_name(configured_fuel_url), configured_fuel_url)],
+            parse_fuel_items,
+            force_refresh=True,
+        )
+        if is_reportable_snapshot(direct_result):
+            return direct_result
+        print(f"[External Collector] configured fuel url failed, fallback to Petrolimex list url={configured_fuel_url}")
+
+    list_url = configured_fuel_url or "https://www.petrolimex.com.vn/nd/gia-xang-dau.html"
+    if "petrolimex.com.vn/nd/gia-xang-dau" not in list_url:
+        list_url = "https://www.petrolimex.com.vn/nd/gia-xang-dau.html"
+
+    result = _base_result("fuel", date_key)
+    latest_snapshot = get_latest_valid_snapshot("fuel", before_date_key=date_key, max_days=60)
+    if latest_snapshot:
+        print(f"[External Collector] latest fuel snapshot article={latest_snapshot.get('discovered_article_url')}")
+
+    try:
+        article = discover_latest_petrolimex_fuel_article(list_url)
+        if article:
+            result["discovered_article_title"] = article.get("title")
+            result["discovered_article_url"] = article.get("url")
+            result["discovered_article_published_date"] = article.get("published_date")
+            result["discovery_hash"] = _hash_text(f"{article.get('title')}|{article.get('url')}")
+            result["last_discovered_at"] = _now().isoformat()
+            if (
+                latest_snapshot
+                and latest_snapshot.get("discovered_article_url") == article.get("url")
+                and not force_refresh
+            ):
+                copied = dict(latest_snapshot)
+                copied.update({
+                    "date_key": date_key,
+                    "used_cached_article": True,
+                    "warnings": list(copied.get("warnings") or []) + [
+                        "Bài điều chỉnh giá xăng dầu chưa thay đổi, dùng dữ liệu snapshot gần nhất."
+                    ],
+                    "last_discovered_at": _now().isoformat(),
+                })
+                print("[External Collector] same fuel article detected; copied latest snapshot to today")
+                return save_external_snapshot(_finalize_result(copied))
+
+            print(f"[External Collector] fetch fuel detail url={article.get('url')}")
+            html, _status = _fetch_text(article["url"])
+            parsed = parse_petrolimex_fuel_article(html, article["url"])
+            result.update(parsed)
+            result.update({
+                "source_name": "Petrolimex",
+                "source": "Petrolimex",
+                "source_url": article["url"],
+                "discovered_article_title": article.get("title"),
+                "discovered_article_url": article.get("url"),
+                "discovered_article_published_date": article.get("published_date"),
+                "last_parsed_at": _now().isoformat(),
+                "used_cached_article": False,
+                "tried_sources": ["Petrolimex"],
+                "confidence": 0.8,
+            })
+            if result.get("items"):
+                print(f"[External Collector] parsed fuel detail items={len(result['items'])}")
+                return save_external_snapshot(_finalize_result(result))
+            print("[External Collector] fallback fuel reason=petrolimex_detail_no_valid_items")
+        else:
+            result["errors"].append("Petrolimex:no_article_candidate")
+            print("[External Collector] fallback fuel reason=no_petrolimex_article_candidate")
+    except Exception as exc:
+        detail = str(exc)[:160]
+        result["errors"].append(f"Petrolimex:{detail}")
+        print(f"[External Collector] fallback fuel reason={detail}")
+
+    webgia_sources = [("Webgia Petrolimex", "https://webgia.com/gia-xang-dau/petrolimex/")]
+    webgia_result = _collect_from_sources("fuel", webgia_sources, parse_fuel_items, force_refresh=True)
+    if is_reportable_snapshot(webgia_result):
+        webgia_result["status"] = "partial"
+        return save_external_snapshot(webgia_result)
+
+    if latest_snapshot:
+        fallback = dict(latest_snapshot)
+        fallback.update({
+            "date_key": date_key,
+            "used_cached_article": True,
+            "warnings": list(fallback.get("warnings") or []) + ["Nguồn hiện tại lỗi, dùng dữ liệu cache gần nhất."],
+        })
+        try:
+            latest_date = datetime.strptime(str(latest_snapshot.get("date_key")), "%Y-%m-%d").replace(tzinfo=VN_TZ)
+            if (_now() - latest_date).days > 30:
+                fallback["warnings"].append("Dữ liệu cache đã cũ hơn 30 ngày.")
+        except Exception:
+            pass
+        print("[External Collector] fallback fuel cache latest valid snapshot")
+        return save_external_snapshot(_finalize_result(fallback))
+
+    result["tried_sources"] = ["Petrolimex", "Webgia Petrolimex"]
+    result["errors"].append("Không lấy được dữ liệu fuel từ các nguồn: Petrolimex, Webgia Petrolimex")
+    return save_external_snapshot(_finalize_result(result))
 
 
 def collect_usd_vnd_rate(force_refresh: bool = False) -> dict:

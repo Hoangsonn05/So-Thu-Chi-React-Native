@@ -25,6 +25,7 @@ class ExternalCollectorParserTests(unittest.TestCase):
         self.patches = [
             patch("external_collectors.get_external_snapshot", side_effect=_no_cache),
             patch("external_collectors.find_recent_snapshot", return_value=None),
+            patch("external_collectors.get_latest_valid_snapshot", return_value=None),
             patch("external_collectors.save_external_snapshot", side_effect=_save_passthrough),
         ]
         for item in self.patches:
@@ -63,6 +64,53 @@ class ExternalCollectorParserTests(unittest.TestCase):
         self.assertFalse(rejects)
         self.assertEqual(items[0]["source_name"], "Webgia Petrolimex")
         self.assertEqual(items[0]["price"], 24_350)
+
+    def test_discover_petrolimex_fuel_article(self):
+        html = """
+        <a href="/nd/nhan-su/petrolimex-bo-nhiem.html">Petrolimex công bố nhân sự mới</a>
+        <a href="/nd/gia-xang-dau/petrolimex-dieu-chinh-gia-xang-dau-tu-15-gio-00-phut-ngay-14-5-2026.html">
+        Petrolimex điều chỉnh giá xăng dầu từ 15 giờ 00 phút ngày 14.5.2026</a>
+        <a href="/nd/hoi-nghi/tong-ket.html">Hội nghị tổng kết</a>
+        """
+        with patch("external_collectors._fetch_text", return_value=(html, 200)):
+            article = collectors.discover_latest_petrolimex_fuel_article("https://www.petrolimex.com.vn/nd/gia-xang-dau.html")
+        self.assertIsNotNone(article)
+        self.assertIn("dieu-chinh-gia-xang-dau", article["url"])
+        self.assertEqual(article["source_name"], "Petrolimex")
+
+    def test_discover_ignores_unrelated_articles(self):
+        html = """
+        <a href="/nd/hoi-nghi/a.html">Hội nghị người lao động Petrolimex</a>
+        <a href="/nd/co-dong/b.html">Thông tin cổ đông thường niên</a>
+        <a href="/nd/canh-bao/c.html">Cảnh báo lừa đảo</a>
+        """
+        with patch("external_collectors._fetch_text", return_value=(html, 200)):
+            article = collectors.discover_latest_petrolimex_fuel_article("https://www.petrolimex.com.vn/nd/gia-xang-dau.html")
+        self.assertIsNone(article)
+
+    def test_parse_petrolimex_detail_article(self):
+        html = """
+        <h1>Petrolimex điều chỉnh giá xăng dầu từ 15 giờ 00 phút ngày 14.5.2026</h1>
+        <p>Đơn vị xăng dầu: VND/lít; Mazut: VND/kg</p>
+        <tr><td>RON95-III vùng 1</td><td>24.350</td></tr>
+        <tr><td>E5 RON92-II vùng 1</td><td>23.050</td></tr>
+        <tr><td>DO 0,05S-II vùng 1</td><td>21.200</td></tr>
+        <tr><td>Dầu hỏa vùng 1</td><td>21.000</td></tr>
+        <tr><td>Mazut vùng 1</td><td>17.500</td></tr>
+        """
+        parsed = collectors.parse_petrolimex_fuel_article(html, "https://www.petrolimex.com.vn/detail")
+        self.assertEqual(len(parsed["items"]), 5)
+        self.assertEqual(parsed["items"][0]["price"], 24_350)
+        self.assertEqual(parsed["effective_time"], "15:00 14/05/2026")
+
+    def test_parse_petrolimex_detail_rejects_bad_ron95(self):
+        html = """
+        <p>Đơn vị: VND/lít</p>
+        <tr><td>RON95 vùng 1</td><td>5.202</td></tr>
+        """
+        parsed = collectors.parse_petrolimex_fuel_article(html, "https://www.petrolimex.com.vn/detail")
+        self.assertEqual(parsed["items"], [])
+        self.assertTrue(any("invalid_fuel_price" in item for item in parsed["warnings"]))
 
     def test_fuel_ron95_5202_rejected(self):
         html = "<tr><td>RON95-III vùng 1</td><td>5.202 VND/lít</td></tr>"
@@ -115,14 +163,12 @@ class ExternalCollectorParserTests(unittest.TestCase):
 
         def fake_fetch(url):
             calls.append(url)
-            if len(calls) == 1:
-                raise RuntimeError("primary failed")
             return "<tr><td>RON95-III vùng 1</td><td>24350 VND/lít</td></tr>", 200
 
-        with patch("external_collectors._fetch_text", side_effect=fake_fetch):
-            with patch("external_collectors._parse_env_urls", return_value=[("Primary", "https://a"), ("Backup", "https://b")]):
+        with patch("external_collectors.discover_latest_petrolimex_fuel_article", side_effect=RuntimeError("primary failed")):
+            with patch("external_collectors._fetch_text", side_effect=fake_fetch):
                 result = collectors.collect_fuel_price(force_refresh=True)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         self.assertTrue(result["has_valid_items"])
         self.assertEqual(result["items"][0]["price"], 24_350)
 
@@ -141,6 +187,56 @@ class ExternalCollectorParserTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertIn(result["status"], {"ok", "partial"})
         self.assertEqual(result["items"][0]["buy"], 25_120)
+
+    def test_collect_fuel_same_article_uses_latest_snapshot_without_detail_fetch(self):
+        latest = {
+            "topic": "fuel",
+            "date_key": "2026-05-14",
+            "status": "ok",
+            "is_valid": True,
+            "has_valid_items": True,
+            "discovered_article_url": "https://www.petrolimex.com.vn/detail-a",
+            "items": [{"name": "RON95-III", "price": 24_350, "unit": "VND/lít", "source_name": "Petrolimex"}],
+            "warnings": [],
+        }
+        with patch("external_collectors.get_latest_valid_snapshot", return_value=latest):
+            with patch("external_collectors.discover_latest_petrolimex_fuel_article", return_value={"title": "A", "url": "https://www.petrolimex.com.vn/detail-a", "published_date": "14/05/2026"}):
+                with patch("external_collectors._fetch_text", side_effect=AssertionError("detail should not be fetched")):
+                    result = collectors.collect_fuel_price(force_refresh=False)
+        self.assertTrue(result["used_cached_article"])
+        self.assertTrue(result["has_valid_items"])
+
+    def test_collect_fuel_new_article_fetches_detail(self):
+        latest = {"topic": "fuel", "date_key": "2026-05-14", "status": "ok", "is_valid": True, "has_valid_items": True, "discovered_article_url": "https://old", "items": []}
+        detail = """
+        <p>Đơn vị: VND/lít</p>
+        <tr><td>RON95-III vùng 1</td><td>24.350</td></tr>
+        """
+        with patch("external_collectors.get_latest_valid_snapshot", return_value=latest):
+            with patch("external_collectors.discover_latest_petrolimex_fuel_article", return_value={"title": "New", "url": "https://new", "published_date": "15/05/2026"}):
+                with patch("external_collectors._fetch_text", return_value=(detail, 200)):
+                    result = collectors.collect_fuel_price(force_refresh=False)
+        self.assertFalse(result.get("used_cached_article"))
+        self.assertEqual(result["discovered_article_url"], "https://new")
+        self.assertEqual(result["items"][0]["price"], 24_350)
+
+    def test_collect_fuel_source_error_uses_latest_snapshot(self):
+        latest = {
+            "topic": "fuel",
+            "date_key": "2026-05-14",
+            "status": "ok",
+            "is_valid": True,
+            "has_valid_items": True,
+            "discovered_article_url": "https://old",
+            "items": [{"name": "RON95-III", "price": 24_350, "unit": "VND/lít", "source_name": "Petrolimex"}],
+            "warnings": [],
+        }
+        with patch("external_collectors.get_latest_valid_snapshot", return_value=latest):
+            with patch("external_collectors.discover_latest_petrolimex_fuel_article", side_effect=RuntimeError("network down")):
+                with patch("external_collectors._fetch_text", side_effect=RuntimeError("webgia down")):
+                    result = collectors.collect_fuel_price(force_refresh=False)
+        self.assertTrue(result["used_cached_article"])
+        self.assertTrue(any("cache" in warning.lower() for warning in result["warnings"]))
 
     def test_source_name_mapping_not_env_name(self):
         self.assertEqual(collectors._friendly_source_name("https://btmc.vn/gia-vang-theo-ngay.html"), "BTMC")
