@@ -35,9 +35,12 @@ DEFAULT_GOLD_URLS = [
 DEFAULT_FUEL_URLS = [
     ("Petrolimex", "https://www.petrolimex.com.vn/nd/gia-xang-dau.html"),
     ("Webgia Petrolimex", "https://webgia.com/gia-xang-dau/petrolimex/"),
+    ("Petrolimex thông cáo", "https://www.petrolimex.com.vn/ndi/thong-cao-bao-chi.html"),
+    ("Bộ Công Thương", "https://moit.gov.vn/"),
 ]
 DEFAULT_USD_URLS = [
-    ("SBV", "https://sbv.gov.vn/vi/web/guest/ty-gia"),
+    ("Vietcombank", "https://portal.vietcombank.com.vn/Usercontrols/TVPortal.TyGia/pXML.aspx?b=10"),
+    ("NHNN", "https://sbv.gov.vn/vi/web/guest/ty-gia"),
     ("Vietcombank", "https://www.vietcombank.com.vn/vi-VN/KHCN/Cong-cu-Tien-ich/Ty-gia"),
 ]
 DEFAULT_AI_URLS = {
@@ -181,17 +184,50 @@ def _parse_env_urls(primary_key: str, backup_key: str, defaults: list[tuple[str,
     sources: list[tuple[str, str]] = []
     primary = (os.getenv(primary_key) or "").strip()
     if primary:
-        sources.append((primary_key, primary))
+        sources.append((_friendly_source_name(primary), primary))
     backup = os.getenv(backup_key) or ""
     for idx, url in enumerate(re.split(r"[\n,|]+", backup)):
         url = url.strip()
         if url:
-            sources.append((f"{backup_key}_{idx + 1}", url))
+            sources.append((_friendly_source_name(url), url))
     seen = {url for _name, url in sources}
     for name, url in defaults:
         if url not in seen:
             sources.append((name, url))
     return sources
+
+
+def _friendly_source_name(url_or_name: str) -> str:
+    value = url_or_name or ""
+    normalized = value.lower()
+    if "btmc.vn" in normalized:
+        return "BTMC"
+    if "giavang.pnj.com.vn" in normalized or "pnj.com.vn" in normalized:
+        return "PNJ"
+    if "webgia.com/gia-vang" in normalized:
+        return "Webgia"
+    if "petrolimex.com.vn/nd/gia-xang-dau" in normalized:
+        return "Petrolimex"
+    if "petrolimex.com.vn/ndi/thong-cao-bao-chi" in normalized:
+        return "Petrolimex thông cáo"
+    if "webgia.com/gia-xang-dau/petrolimex" in normalized:
+        return "Webgia Petrolimex"
+    if "moit.gov.vn" in normalized:
+        return "Bộ Công Thương"
+    if "sbv.gov.vn" in normalized:
+        return "NHNN"
+    if "vietcombank.com.vn" in normalized:
+        return "Vietcombank"
+    if "openai.com" in normalized:
+        return "OpenAI"
+    if "ai.google.dev" in normalized:
+        return "Google AI/Gemini"
+    if "deepseek.com" in normalized or "api-docs.deepseek.com" in normalized:
+        return "DeepSeek"
+    domain_match = re.search(r"https?://([^/]+)", value)
+    if domain_match:
+        return domain_match.group(1).replace("www.", "")
+    return value if not value.startswith("EXTERNAL_") else "Nguồn cấu hình"
 
 
 def _fetch_text(url: str) -> tuple[str, int]:
@@ -430,7 +466,7 @@ def _fuel_name(line: str) -> Optional[str]:
     if "e5" in normalized and ("ron92" in normalized or "ron 92" in normalized):
         return "E5 RON92-II"
     if "diesel" in normalized or "do 0.05" in normalized:
-        return "Diesel DO 0.05S-II"
+        return "Diesel DO 0.05S"
     if "dau hoa" in normalized or "2-k" in normalized:
         return "Dầu hỏa 2-K"
     if "mazut" in normalized:
@@ -490,6 +526,7 @@ def parse_fuel_items(text: str, source_name: str, source_time: Optional[str] = N
             "price": price,
             "unit": unit,
             "source_name": source_name,
+            "source_url": "",
             "effective_time": source_time,
             "source_time": source_time,
         }
@@ -511,6 +548,34 @@ def _validate_usd_rate(value: Optional[int]) -> bool:
 
 
 def parse_usd_vnd_items(text: str, source_name: str, source_time: Optional[str] = None) -> tuple[list[dict], list[str]]:
+    xml_match = re.search(r"<Exrate\b[^>]*(?:CurrencyCode|CurrencyName)=[\"'][^\"']*(?:USD|US DOLLAR)[^\"']*[\"'][^>]*/?>", text or "", re.I)
+    if xml_match:
+        tag = xml_match.group(0)
+        attrs = dict(re.findall(r"(\w+)=[\"']([^\"']*)[\"']", tag))
+        buy = _to_int_vnd(attrs.get("Buy", ""))
+        transfer = _to_int_vnd(attrs.get("Transfer", ""))
+        sell = _to_int_vnd(attrs.get("Sell", ""))
+        rejects = []
+        for label, value in [("buy", buy), ("transfer", transfer), ("sell", sell)]:
+            if value is not None and not _validate_usd_rate(value):
+                rejects.append(f"{label}_invalid:{value}")
+        if buy and sell and sell < buy:
+            rejects.append("usd_sell_less_than_buy")
+        if rejects or not any([buy, transfer, sell]):
+            return [], rejects or ["usd_rate_not_found"]
+        xml_time = source_time or attrs.get("DateTime") or attrs.get("Date") or attrs.get("Time")
+        return [{
+            "item_key": "usd_vnd.vietcombank.usd",
+            "central_rate": None,
+            "buy": buy,
+            "transfer": transfer,
+            "sell": sell,
+            "unit": "VND/USD",
+            "source_name": "Vietcombank",
+            "source_url": "https://portal.vietcombank.com.vn/Usercontrols/TVPortal.TyGia/pXML.aspx?b=10",
+            "source_time": xml_time,
+        }], []
+
     lines = _html_to_lines(text)
     central_rate = None
     buy = None
@@ -552,9 +617,11 @@ def parse_usd_vnd_items(text: str, source_name: str, source_time: Optional[str] 
         "item_key": "usd_vnd.central_rate",
         "central_rate": central_rate,
         "buy": buy,
+        "transfer": None,
         "sell": sell,
         "unit": "VND/USD",
         "source_name": source_name,
+        "source_url": "",
         "source_time": source_time,
     }
     print("[External Collector] parser=usd_vnd items=1 rejects=%s" % len(rejects))
@@ -646,8 +713,11 @@ def _collect_from_sources(topic: str, sources: list[tuple[str, str]], parser: Ca
         return cached
     result = _base_result(topic, date_key)
     tried = []
+    tried_names = []
     for source_name, source_url in sources:
+        source_name = _friendly_source_name(source_url) or source_name
         tried.append(source_url)
+        tried_names.append(source_name)
         result["source_name"] = source_name
         result["source"] = source_name
         result["source_url"] = source_url
@@ -655,6 +725,9 @@ def _collect_from_sources(topic: str, sources: list[tuple[str, str]], parser: Ca
             html, _status = _fetch_text(source_url)
             source_time = _source_time_from_text(html)
             items, rejects = parser(html, source_name, source_time)
+            for item in items:
+                item.setdefault("source_url", source_url)
+                item["source_name"] = item.get("source_name") or source_name
             result["raw_hash"] = _hash_text(_compact_text(html, RAW_TEXT_LIMIT))
             result["raw_text_short"] = _compact_text(html, RAW_TEXT_LIMIT)
             result["source_time"] = source_time
@@ -670,7 +743,8 @@ def _collect_from_sources(topic: str, sources: list[tuple[str, str]], parser: Ca
             result["errors"].append(f"{source_name}:{detail}")
             print(f"[External Collector] fallback topic={topic} from={source_name} reason={detail}")
     if not result["items"]:
-        result["errors"].append(f"Không lấy được dữ liệu {topic} từ các nguồn: {', '.join(tried)}")
+        result["errors"].append(f"Không lấy được dữ liệu {topic} từ các nguồn: {', '.join(tried_names)}")
+    result["tried_sources"] = list(dict.fromkeys(tried_names))
     return _save_or_fallback(_finalize_result(result), force_refresh)
 
 
@@ -680,7 +754,25 @@ def collect_gold_price(force_refresh: bool = False) -> dict:
 
 
 def collect_fuel_price(force_refresh: bool = False) -> dict:
-    sources = _parse_env_urls("EXTERNAL_FUEL_URL", "EXTERNAL_FUEL_BACKUP_URLS", DEFAULT_FUEL_URLS)
+    sources: list[tuple[str, str]] = []
+    primary = (os.getenv("EXTERNAL_FUEL_URL") or "").strip()
+    if primary:
+        sources.append((_friendly_source_name(primary), primary))
+    for name, url in DEFAULT_FUEL_URLS:
+        sources.append((name, url))
+    backup = os.getenv("EXTERNAL_FUEL_BACKUP_URLS") or ""
+    for url in re.split(r"[\n,|]+", backup):
+        url = url.strip()
+        if url:
+            sources.append((_friendly_source_name(url), url))
+    deduped = []
+    seen = set()
+    for name, url in sources:
+        if url in seen:
+            continue
+        seen.add(url)
+        deduped.append((name, url))
+    sources = deduped
     return _collect_from_sources("fuel", sources, parse_fuel_items, force_refresh)
 
 

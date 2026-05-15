@@ -69,7 +69,10 @@ def _is_valid_snapshot(snapshot: dict) -> bool:
 
 
 def _tried_sources(snapshot: dict) -> str:
-    source = snapshot.get("source_url") or snapshot.get("source_name") or snapshot.get("source")
+    tried = snapshot.get("tried_sources") or []
+    if tried:
+        return ", ".join(str(item) for item in tried[:5])
+    source = snapshot.get("source_name") or snapshot.get("source")
     if source:
         return str(source)
     errors = snapshot.get("errors") or []
@@ -132,11 +135,23 @@ def _format_usd(snapshot: dict) -> list[str]:
         return lines + _failure_line("usd_vnd", snapshot)
 
     item = (snapshot.get("items") or [{}])[0]
+    central = _vnd(item.get("central_rate")) if item.get("central_rate") else "chưa lấy được"
+    source_name = item.get("source_name") or snapshot.get("source_name") or "chưa rõ"
+    if source_name == "Vietcombank":
+        lines.extend([
+            f"- Tỷ giá trung tâm NHNN: {central}",
+            f"- Vietcombank mua tiền mặt: {_vnd(item.get('buy'))} VND/USD",
+            f"- Vietcombank chuyển khoản: {_vnd(item.get('transfer'))} VND/USD",
+            f"- Vietcombank bán ra: {_vnd(item.get('sell'))} VND/USD",
+            f"Nguồn: {source_name}",
+            f"Cập nhật: {_source_time(item, snapshot)}",
+        ])
+        return lines
     lines.extend([
-        f"- Tỷ giá trung tâm NHNN: {_vnd(item.get('central_rate'))} VND/USD",
+        f"- Tỷ giá trung tâm NHNN: {central if central == 'chưa lấy được' else central + ' VND/USD'}",
         f"- Mua vào tham khảo: {_vnd(item.get('buy'))} VND/USD",
         f"- Bán ra tham khảo: {_vnd(item.get('sell'))} VND/USD",
-        f"Nguồn: {item.get('source_name') or snapshot.get('source_name') or 'chưa rõ'}",
+        f"Nguồn: {source_name}",
         f"Cập nhật: {_source_time(item, snapshot)}",
     ])
     return lines

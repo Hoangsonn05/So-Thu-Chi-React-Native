@@ -121,6 +121,7 @@ def save_external_snapshot(snapshot: dict) -> dict:
         "items": items,
         "errors": snapshot.get("errors") or ([] if not snapshot.get("error") else [snapshot.get("error")]),
         "warnings": snapshot.get("warnings") or [],
+        "tried_sources": snapshot.get("tried_sources") or [],
         "summary": snapshot.get("summary") or "",
         "confidence": float(snapshot.get("confidence") or 0),
         "raw_hash": snapshot.get("raw_hash"),
