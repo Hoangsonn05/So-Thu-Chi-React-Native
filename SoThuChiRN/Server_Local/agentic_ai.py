@@ -139,9 +139,22 @@ TELEGRAM RESPONSE STYLE:
 - If evidence is missing, say the data is not available instead of guessing.
 
 FINANCE REPORT SCHEDULING:
-- For "len lich bao cao tai chinh luc 21h moi ngay", call schedule_report with schedule_type=daily, time=21:00, report_type=daily_finance_report, timeframe=today.
+- For "len lich bao cao tai chinh luc 21h moi ngay", call `configure_finance_report_schedule` with schedule_type=daily, time=21:00, timezone=Asia/Bangkok, timeframe=today.
 - For expense-only wording, use report_type=expense_report.
 - For weekly/monthly wording, use schedule_type=weekly/monthly and timeframe=current_week/current_month.
+
+NEW REPORT INTENT RULES:
+- External data is not a transaction. If the user mentions gia vang, gia xang, gia GPT, ChatGPT, Gemini, DeepSeek, bao cao sang, or bao cao du lieu ngoai, call `request_external_brief`.
+- Financial report questions like "bao cao tai chinh", "hom nay tieu bao nhieu", or "thang nay chi bao nhieu" must use financial data tools (`query_database`, `top_transactions`, `compare_periods`, or related finance report generator). Never invent financial numbers.
+- Finance report scheduling phrases such as "len lich bao cao", "moi ngay luc", "hang ngay luc", or "cuoi ngay bao cao" must call `configure_finance_report_schedule`.
+- Disable scheduling phrases such as "huy lich bao cao" or "tat bao cao tu dong" must call `disable_finance_report_schedule`.
+- List schedule phrases must call `list_report_schedules`.
+- Transaction logging phrases such as "an sang 30k" or "vua mua ao 200k" are outside this agent. Do not call budget/report tools for them.
+
+EXTERNAL DATA SAFETY:
+- `request_external_brief` handles delivery_state and skip_auto_today itself. You only call the tool.
+- Do not invent gold, fuel, ChatGPT, Gemini, DeepSeek, or AI prices. If collector data is unavailable, say which source/topic was unavailable based on the tool result.
+- Prefer cached snapshots unless the user explicitly asks to refresh.
 """
 
 
@@ -426,6 +439,11 @@ def disable_default_finance_report_task_for_user(uid: str) -> None:
 
 def ensure_default_finance_report_task_for_user(uid: str) -> None:
     db = firestore.client()
+    user_doc = db.collection("users").document(uid).get()
+    user_data = user_doc.to_dict() if user_doc.exists else {}
+    if (user_data or {}).get("finance_report_auto_disabled"):
+        disable_default_finance_report_task_for_user(uid)
+        return
     if _user_has_custom_finance_task(db, uid):
         disable_default_finance_report_task_for_user(uid)
         return
@@ -453,7 +471,7 @@ def _disable_active_custom_finance_tasks(uid: str) -> int:
     return count
 
 
-def list_finance_report_tasks(uid: str) -> str:
+def list_finance_report_tasks(uid: str, include_default: bool = True) -> str:
     db = firestore.client()
     rows = []
     for snap in db.collection("scheduled_tasks").where(filter=FieldFilter("uid", "==", uid)).stream():
@@ -462,6 +480,8 @@ def list_finance_report_tasks(uid: str) -> str:
         if task_type not in FINANCE_REPORT_TASK_TYPES:
             continue
         if task.get("status") not in TASK_ACTIVE_STATUSES:
+            continue
+        if not include_default and task.get("schedule_type") == "default_daily":
             continue
         rows.append({
             "id": snap.id,
@@ -479,29 +499,68 @@ def list_finance_report_tasks(uid: str) -> str:
     return "\n".join(lines)
 
 
-def stop_custom_finance_reports(uid: str) -> str:
+def disable_finance_reports(uid: str, scope: str = "custom_only") -> str:
+    normalized_scope = (scope or "custom_only").strip().lower()
+    db = firestore.client()
+    if normalized_scope == "all":
+        db.collection("users").document(uid).set({
+            "finance_report_auto_disabled": True,
+            "finance_report_auto_disabled_at": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        count = 0
+        for snap in db.collection("scheduled_tasks").where(filter=FieldFilter("uid", "==", uid)).stream():
+            task = snap.to_dict() or {}
+            if task.get("status") not in TASK_ACTIVE_STATUSES:
+                continue
+            if _task_type_from_legacy(task) not in FINANCE_REPORT_TASK_TYPES:
+                continue
+            snap.reference.set({
+                "status": "disabled",
+                "disabled_at": firestore.SERVER_TIMESTAMP,
+                "disabled_reason": "user_disabled_all_finance_reports",
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            }, merge=True)
+            count += 1
+        return f"Da tat {count} lich bao cao tai chinh. Default 20:00 cung da tat."
+
     count = _disable_active_custom_finance_tasks(uid)
+    if normalized_scope == "restore_default":
+        db.collection("users").document(uid).set({
+            "finance_report_auto_disabled": False,
+            "finance_report_auto_disabled_at": None,
+        }, merge=True)
+        ensure_default_finance_report_task_for_user(uid)
+        return "Da khoi phuc lich bao cao tai chinh mac dinh luc 20:00."
     if count:
         return f"Da huy {count} lich bao cao tai chinh rieng. Default 20:00 da duoc bat lai neu ban con Telegram/FCM."
     ensure_default_finance_report_task_for_user(uid)
     return "Khong co lich rieng dang bat. Default bao cao cuoi ngay 20:00 van duoc duy tri."
 
 
-def create_custom_finance_report_task(uid: str, user_time: str, schedule_type: str = "daily", report_type: str = "daily_finance_report", timeframe: str = "today") -> str:
+def stop_custom_finance_reports(uid: str) -> str:
+    return disable_finance_reports(uid, "custom_only")
+
+
+def create_custom_finance_report_task(uid: str, user_time: str, schedule_type: str = "daily", report_type: str = "daily_finance_report", timeframe: str = "today", timezone_name: str = DEFAULT_TIMEZONE) -> str:
     db = firestore.client()
+    db.collection("users").document(uid).set({
+        "finance_report_auto_disabled": False,
+        "finance_report_auto_disabled_at": None,
+    }, merge=True)
     task_type = _task_type_from_legacy({"report_type": report_type})
     if task_type not in {"daily_finance_report", "expense_report", "weekly_finance_report", "monthly_finance_report"}:
         task_type = "daily_finance_report"
     normalized_schedule = _normalize_schedule_type(schedule_type, task_type)
     normalized_time = _parse_user_time(user_time, DEFAULT_FINANCE_SEND_TIME)
     normalized_timeframe = _normalize_timeframe(timeframe, normalized_schedule, task_type)
+    normalized_timezone = timezone_name if timezone_name in {"Asia/Bangkok", "Asia/Ho_Chi_Minh"} else DEFAULT_TIMEZONE
     now_utc = datetime.now(timezone.utc)
     task = {
         "uid": uid,
         "task_type": task_type,
         "schedule_type": normalized_schedule,
         "status": "active",
-        "timezone": DEFAULT_TIMEZONE,
+        "timezone": normalized_timezone,
         "time": normalized_time,
         "last_run_at": None,
         "last_success_at": None,
@@ -523,6 +582,41 @@ def create_custom_finance_report_task(uid: str, user_time: str, schedule_type: s
         "task_id": doc_id,
         "timeframe": normalized_timeframe,
     }, ensure_ascii=False)
+
+
+def execute_configure_finance_report_schedule(firebase_uid: str, schedule_type: str, time: str, timezone_name: str = DEFAULT_TIMEZONE, timeframe: str = "today") -> str:
+    return create_custom_finance_report_task(
+        firebase_uid,
+        user_time=time or DEFAULT_FINANCE_SEND_TIME,
+        schedule_type=schedule_type or "daily",
+        report_type="daily_finance_report",
+        timeframe=timeframe or None,
+        timezone_name=timezone_name or DEFAULT_TIMEZONE,
+    )
+
+
+def execute_disable_finance_report_schedule(firebase_uid: str, scope: str = "custom_only") -> str:
+    try:
+        return json.dumps({
+            "status": "success",
+            "message": disable_finance_reports(firebase_uid, scope),
+            "scope": scope or "custom_only",
+        }, ensure_ascii=False)
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
+
+
+def execute_list_report_schedules(firebase_uid: str, include_default: bool = True) -> str:
+    try:
+        return json.dumps({
+            "status": "success",
+            "message": list_finance_report_tasks(firebase_uid, include_default=bool(include_default)),
+            "include_default": bool(include_default),
+        }, ensure_ascii=False)
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False)
 
 
 def execute_schedule_report(firebase_uid: str, target_datetime_iso: Optional[str] = None, report_type: str = "daily_finance_report", schedule_type: Optional[str] = None, time: Optional[str] = None, frequency: Optional[str] = None, timeframe: Optional[str] = None) -> str:
@@ -1067,6 +1161,73 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
         {
             "type": "function",
             "function": {
+                "name": "request_external_brief",
+                "description": "Gui ngay bao cao du lieu ngoai: bao cao sang, gia vang, gia xang, gia GPT/ChatGPT/Gemini/DeepSeek. Khong dung cho giao dich.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "brief_type": {
+                            "type": "string",
+                            "enum": ["morning_external_brief", "gold_price_brief", "fuel_price_brief", "ai_price_brief"],
+                            "description": "Loai bao cao du lieu ngoai can gui."
+                        },
+                        "force_refresh": {
+                            "type": "boolean",
+                            "description": "Mac dinh false de uu tien cached snapshot; true neu user yeu cau cap nhat/refresh."
+                        }
+                    },
+                    "required": ["brief_type", "force_refresh"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "configure_finance_report_schedule",
+                "description": "Dat lich bao cao tai chinh lap lai hang ngay/hang tuan/hang thang. Dung cho 'len lich bao cao', 'moi ngay luc', 'hang ngay luc', 'cuoi ngay bao cao'.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "schedule_type": { "type": "string", "enum": ["daily", "weekly", "monthly"] },
+                        "time": { "type": "string", "description": "HH:mm theo gio dia phuong, vi du 20:00." },
+                        "timezone": { "type": "string", "enum": ["Asia/Bangkok"] },
+                        "timeframe": { "type": "string", "enum": ["today", "current_week", "current_month"] }
+                    },
+                    "required": ["schedule_type", "time", "timezone", "timeframe"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "disable_finance_report_schedule",
+                "description": "Huy/tat lich bao cao tai chinh tu dong.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "scope": { "type": "string", "enum": ["custom_only", "all", "restore_default"] }
+                    },
+                    "required": ["scope"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_report_schedules",
+                "description": "Liet ke lich bao cao tai chinh dang bat.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "include_default": { "type": "boolean" }
+                    },
+                    "required": ["include_default"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "compare_periods",
                 "description": "Compare computed financial totals between two periods. Python computes all totals and percentage changes from Firestore.",
                 "parameters": {
@@ -1196,6 +1357,30 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                     frequency=arguments.get("frequency"),
                     timeframe=arguments.get("timeframe")
                 )
+            elif function_name == "request_external_brief":
+                db_result = execute_request_external_brief(
+                    firebase_uid=firebase_uid,
+                    brief_type=arguments.get("brief_type", DEFAULT_EXTERNAL_BRIEF_TASK_TYPE),
+                    force_refresh=arguments.get("force_refresh", False),
+                )
+            elif function_name == "configure_finance_report_schedule":
+                db_result = execute_configure_finance_report_schedule(
+                    firebase_uid=firebase_uid,
+                    schedule_type=arguments.get("schedule_type", "daily"),
+                    time=arguments.get("time", DEFAULT_FINANCE_SEND_TIME),
+                    timezone_name=arguments.get("timezone", DEFAULT_TIMEZONE),
+                    timeframe=arguments.get("timeframe", "today"),
+                )
+            elif function_name == "disable_finance_report_schedule":
+                db_result = execute_disable_finance_report_schedule(
+                    firebase_uid=firebase_uid,
+                    scope=arguments.get("scope", "custom_only"),
+                )
+            elif function_name == "list_report_schedules":
+                db_result = execute_list_report_schedules(
+                    firebase_uid=firebase_uid,
+                    include_default=arguments.get("include_default", True),
+                )
             elif function_name == "compare_periods":
                 db_result = execute_compare_periods(
                     firebase_uid=firebase_uid,
@@ -1234,6 +1419,22 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
                 )
             else:
                 db_result = json.dumps({"error": "Unknown function"})
+
+            if function_name in {
+                "request_external_brief",
+                "configure_finance_report_schedule",
+                "disable_finance_report_schedule",
+                "list_report_schedules",
+                "schedule_report",
+                "set_budget_alert",
+            }:
+                try:
+                    parsed_result = json.loads(db_result)
+                    direct_message = parsed_result.get("message")
+                    if direct_message:
+                        return str(direct_message).strip()
+                except Exception:
+                    pass
             
             # CẬP NHẬT: Đưa khối lệnh xử lý Tool Response ra ngoài khối if/else
             # Đảm bảo dù là tool nào thì kết quả cũng được gửi về cho AI tổng hợp
@@ -1677,6 +1878,9 @@ def ensure_default_scheduled_tasks(db) -> None:
             continue
         uid = user_doc.id
         _create_default_task_if_missing(db, uid, DEFAULT_EXTERNAL_BRIEF_TASK_TYPE, DEFAULT_EXTERNAL_SEND_TIME)
+        if user_data.get("finance_report_auto_disabled"):
+            disable_default_finance_report_task_for_user(uid)
+            continue
         if _user_has_custom_finance_task(db, uid):
             disable_default_finance_report_task_for_user(uid)
         else:
@@ -2263,7 +2467,7 @@ def send_report_to_user(uid: str, title: str, content: str, payload: Optional[di
     return sent
 
 
-def handle_manual_external_report_request(uid: str, requested_type: str, source: str = "telegram") -> str:
+def handle_manual_external_report_request(uid: str, requested_type: str, source: str = "telegram", force_refresh: bool = False) -> str:
     if requested_type not in EXTERNAL_BRIEF_TASK_TYPES:
         raise ValueError("unsupported_external_brief_type")
 
@@ -2282,6 +2486,7 @@ def handle_manual_external_report_request(uid: str, requested_type: str, source:
         "manual",
         report_id,
         now=now,
+        force_refresh=force_refresh,
         extra_payload={"source": source},
     )
     update_delivery_state(
@@ -2301,6 +2506,30 @@ def handle_manual_external_report_request(uid: str, requested_type: str, source:
         f"date={date_key} skip_auto_today={skip_auto_today}"
     )
     return content
+
+
+def execute_request_external_brief(firebase_uid: str, brief_type: str, force_refresh: bool = False) -> str:
+    try:
+        requested_type = brief_type if brief_type in EXTERNAL_BRIEF_TASK_TYPES else DEFAULT_EXTERNAL_BRIEF_TASK_TYPE
+        content = handle_manual_external_report_request(
+            firebase_uid,
+            requested_type,
+            source="agentic_tool",
+            force_refresh=bool(force_refresh),
+        )
+        return json.dumps({
+            "status": "success",
+            "message": "Da gui bao cao du lieu ngoai.",
+            "brief_type": requested_type,
+            "content": content,
+        }, ensure_ascii=False)
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({
+            "status": "error",
+            "error": str(e),
+            "message": f"Chua lay/gui duoc bao cao du lieu ngoai: {str(e)[:150]}",
+        }, ensure_ascii=False)
 
 
 def send_manual_report(uid: str, task_type: str) -> str:

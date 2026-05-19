@@ -158,6 +158,7 @@ def process_agentic_query(bot_token: str, firebase_uid: str, chat_id: int, text:
     from agentic_ai import (
         chat_with_agentic_ai,
         create_custom_finance_report_task,
+        disable_finance_reports,
         handle_manual_external_report_request,
         list_finance_report_tasks,
         send_manual_report,
@@ -167,6 +168,35 @@ def process_agentic_query(bot_token: str, firebase_uid: str, chat_id: int, text:
     try:
         print(f"[Agentic] Bắt đầu xử lý truy vấn cho UID: {firebase_uid}")
         intent_text = _normalize_intent_text(text)
+        if _is_disable_report_schedule_request(intent_text):
+            scope = "all" if any(k in intent_text for k in ["tat bao cao tu dong", "tat lich bao cao"]) else "custom_only"
+            send_telegram_message(bot_token, chat_id, disable_finance_reports(firebase_uid, scope))
+            return
+        if _is_list_report_schedule_request(intent_text):
+            send_telegram_message(bot_token, chat_id, list_finance_report_tasks(firebase_uid))
+            return
+        deterministic_schedule_match = re.search(r"(?:luc|lúc)\s*(\d{1,2})(?::?([0-5]\d))?\s*h?", intent_text)
+        if deterministic_schedule_match and _is_finance_report_schedule_request(intent_text):
+            hour = int(deterministic_schedule_match.group(1))
+            minute = int(deterministic_schedule_match.group(2) or 0)
+            report_type = "expense_report" if "chi tieu" in intent_text else "daily_finance_report"
+            if any(k in intent_text for k in ["moi thang", "hang thang", "thang", "monthly"]):
+                schedule_type = "monthly"
+                timeframe = "current_month"
+            elif any(k in intent_text for k in ["moi tuan", "hang tuan", "tuan", "weekly"]):
+                schedule_type = "weekly"
+                timeframe = "current_week"
+            else:
+                schedule_type = "daily"
+                timeframe = "today"
+            result = create_custom_finance_report_task(firebase_uid, f"{hour:02d}:{minute:02d}", schedule_type, report_type, timeframe)
+            send_telegram_message(bot_token, chat_id, json.loads(result).get("message", "Da len lich bao cao."))
+            return
+        manual_external_type = _detect_manual_report_task_type(text)
+        if manual_external_type in EXTERNAL_BRIEF_TASK_TYPES:
+            force_refresh = any(k in intent_text for k in ["refresh", "cap nhat moi", "lay moi", "moi nhat"])
+            handle_manual_external_report_request(firebase_uid, manual_external_type, source="telegram", force_refresh=force_refresh)
+            return
         schedule_match = re.search(r"(?:luc|lúc)\s*(\d{1,2})(?::?([0-5]\d))?\s*h?", intent_text)
         if any(k in intent_text for k in ["huy lich bao cao", "hủy lịch báo cáo", "stopreport"]):
             send_telegram_message(bot_token, chat_id, stop_custom_finance_reports(firebase_uid))
@@ -246,14 +276,12 @@ def _detect_manual_report_task_type(text: str) -> Optional[str]:
         return "gold_price_brief"
     if any(k in lower_text for k in ["gia xang", "xang dau"]):
         return "fuel_price_brief"
-    if any(k in lower_text for k in ["gia ai", "goi ai"]) or (
-        wants_report and any(k in lower_text for k in ["gpt", "openai", "chatgpt", "gemini", "deepseek"])
-    ):
+    if any(k in lower_text for k in ["gia ai", "goi ai", "gia gpt", "gpt", "openai", "chatgpt", "gemini", "deepseek"]):
         return "ai_price_brief"
-    if wants_report and any(k in lower_text for k in [
+    if any(k in lower_text for k in [
         "bao cao sang", "sang nay", "morning", "morning brief",
         "du lieu ngoai", "tai chinh ngoai", "thi truong",
-    ]):
+    ]) and wants_report:
         return "morning_external_brief"
     if wants_report and any(k in lower_text for k in ["tuan", "weekly"]):
         return "weekly_finance_report"
@@ -262,6 +290,44 @@ def _detect_manual_report_task_type(text: str) -> Optional[str]:
     if wants_report and any(k in lower_text for k in ["hom nay", "ngay", "daily", "chi tieu", "tai chinh"]):
         return "daily_finance_report"
     return None
+
+
+def _is_disable_report_schedule_request(lower_text: str) -> bool:
+    return any(k in lower_text for k in [
+        "huy lich bao cao", "tat bao cao tu dong", "dung bao cao tu dong",
+        "stopreport", "tat lich bao cao", "bo lich bao cao",
+    ])
+
+
+def _is_list_report_schedule_request(lower_text: str) -> bool:
+    return any(k in lower_text for k in [
+        "xem lich bao cao", "lich bao cao", "myreports", "danh sach lich",
+    ]) and not _is_disable_report_schedule_request(lower_text)
+
+
+def _is_finance_report_schedule_request(lower_text: str) -> bool:
+    has_report = "bao cao" in lower_text
+    has_schedule = any(k in lower_text for k in [
+        "len lich", "dat lich", "moi ngay luc", "hang ngay luc", "hang ngay",
+        "cuoi ngay", "moi tuan", "hang tuan", "moi thang", "hang thang",
+    ])
+    return has_report and has_schedule and not _is_disable_report_schedule_request(lower_text)
+
+
+def _is_budget_alert_request(lower_text: str) -> bool:
+    return any(k in lower_text for k in [
+        "dat ngan sach", "dat han muc", "han muc chi tieu", "gioi han chi tieu",
+        "canh bao ngan sach", "bao khi tieu qua", "nguong canh bao",
+    ])
+
+
+def _is_finance_query_request(lower_text: str) -> bool:
+    return any(k in lower_text for k in [
+        "bao cao tai chinh", "hom nay tieu bao nhieu", "thang nay chi bao nhieu",
+        "thang nay tieu bao nhieu", "tuan nay tieu bao nhieu", "tong chi",
+        "tong thu", "bao nhieu", "thong ke", "top giao dich", "giao dich lon",
+        "so voi thang truoc", "so voi tuan truoc", "xu huong danh muc",
+    ])
 
 
 class ExportEmailRequest(BaseModel):
@@ -2199,6 +2265,16 @@ async def telegram_webhook(bot_token: str, request: Request, background_tasks: B
                 "lich bao cao", "huy lich", "xem lich"
             ])
             
+            is_query = (
+                manual_report_type is not None
+                or _is_finance_report_schedule_request(lower_text)
+                or _is_disable_report_schedule_request(lower_text)
+                or _is_list_report_schedule_request(lower_text)
+                or _is_budget_alert_request(lower_text)
+                or _is_finance_query_request(lower_text)
+                or "?" in lower_text
+            )
+
             if is_query:
                 background_tasks.add_task(process_agentic_query, bot_token, firebase_uid, chat_id, text)
             else:
