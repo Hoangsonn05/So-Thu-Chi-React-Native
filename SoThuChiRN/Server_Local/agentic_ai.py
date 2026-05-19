@@ -6,6 +6,7 @@ import calendar
 import hashlib
 import re
 import unicodedata
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 try:
@@ -19,11 +20,12 @@ from firebase_admin import firestore, messaging
 
 # Dùng chung config
 from dotenv import load_dotenv
+from runtime_config import OPENROUTER_API_KEY, sanitize_log_text
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'), override=True)
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
+logger = logging.getLogger("sothuchi.agentic")
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b:free"
 DEFAULT_TIMEZONE = "Asia/Bangkok"
@@ -325,10 +327,10 @@ def should_skip_auto_delivery(uid: str, task_type: str, scheduled_time: str, now
     date_key = get_date_key(now, DEFAULT_TIMEZONE)
     state = get_delivery_state(uid, task_type, date_key)
     if state.get("auto_send_done"):
-        print(f"[DeliveryState] skip auto: already sent uid={uid} task={task_type} date={date_key}")
+        print(f"[DeliveryState] decision=auto_send_done uid={uid} task={task_type} date={date_key}")
         return True
     if state.get("skip_auto_today"):
-        print(f"[DeliveryState] skip auto: manual before schedule uid={uid} task={task_type} date={date_key}")
+        print(f"[DeliveryState] decision=skip_auto_today uid={uid} task={task_type} date={date_key}")
         return True
     if task_type in EXTERNAL_BRIEF_TASK_TYPES and state.get("manual_send_done"):
         tz = _get_tz(DEFAULT_TIMEZONE)
@@ -336,7 +338,7 @@ def should_skip_auto_delivery(uid: str, task_type: str, scheduled_time: str, now
         hour, minute = _parse_hhmm(scheduled_time, DEFAULT_EXTERNAL_SEND_TIME)
         scheduled_at = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if local_now >= scheduled_at:
-            print(f"[DeliveryState] skip auto: manual after schedule uid={uid} task={task_type} date={date_key}")
+            print(f"[DeliveryState] decision=manual_send_done uid={uid} task={task_type} date={date_key}")
             return True
     return False
 
@@ -353,6 +355,10 @@ def mark_manual_report_delivery(uid: str, task_type: str, scheduled_time: str, s
         skip_auto_today=skip_auto_today,
         last_manual_at=firestore.SERVER_TIMESTAMP,
         last_report_id=None,
+    )
+    print(
+        f"[DeliveryState] decision=manual_send_done uid={uid} task={task_type} "
+        f"date={date_key} skip_auto_today={skip_auto_today}"
     )
 
 
@@ -877,6 +883,9 @@ def _ai_finance_comment(data: dict, mode: str) -> str:
         f"Mode: {mode}\nData: {json.dumps(data, ensure_ascii=False)}"
     )
     try:
+        if not OPENROUTER_API_KEY:
+            logger.warning("[OpenRouter] OPENROUTER_API_KEY=missing feature=finance_report_comment")
+            return _rule_based_finance_comment(data)
         payload = {
             "model": MODEL_NAME,
             "messages": [{"role": "user", "content": prompt}],
@@ -893,7 +902,7 @@ def _ai_finance_comment(data: dict, mode: str) -> str:
         content = response.json()["choices"][0]["message"]["content"].strip()
         return content or _rule_based_finance_comment(data)
     except Exception as e:
-        print(f"[Finance Report AI Comment Error] {e}")
+        print(f"[Finance Report AI Comment Error] {sanitize_log_text(e)}")
         return _rule_based_finance_comment(data)
 
 
@@ -1319,6 +1328,9 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
         "tools": tools,
         "tool_choice": "auto"
     }
+    if not OPENROUTER_API_KEY:
+        logger.warning("[OpenRouter] OPENROUTER_API_KEY=missing feature=agentic_chat")
+        return "Tinh nang AI chua duoc cau hinh tren server."
 
     headers = {
         "Content-Type": "application/json",
@@ -1472,7 +1484,7 @@ def chat_with_agentic_ai(text: str, firebase_uid: str) -> Optional[str]:
             return message["content"].strip()
             
     except Exception as e:
-        print(f"[Agentic AI Error] {e}")
+        print(f"[Agentic AI Error] {sanitize_log_text(e)}")
         traceback.print_exc()
         return "Hiện tại hệ thống đang gặp sự cố kết nối hoặc dữ liệu. Bạn vui lòng thử lại sau ít phút nhé!"
 
@@ -2460,10 +2472,11 @@ def send_report_to_user(uid: str, title: str, content: str, payload: Optional[di
 
     if not any(sent.values()):
         if errors:
-            raise RuntimeError(f"delivery_failed:{errors}")
+            raise RuntimeError(f"delivery_failed:{sanitize_log_text(errors)}")
+        print(f"[Scheduler] no_delivery_channel uid={uid}")
         raise NoDeliveryChannelError("no_delivery_channel")
     if errors:
-        print(f"[Scheduler] partial delivery uid={uid} sent={sent} errors={errors}")
+        print(f"[Scheduler] partial delivery uid={uid} sent={sent} errors={sanitize_log_text(errors)}")
     return sent
 
 
@@ -2576,6 +2589,7 @@ def _mark_auto_delivery(uid: str, task_type: str, task_id: str, scheduled_time: 
         last_auto_at=firestore.SERVER_TIMESTAMP,
         last_report_id=task_id,
     )
+    print(f"[DeliveryState] decision=auto_send_done uid={uid} task={task_type} date={date_key}")
 
 
 def execute_scheduled_task(task_id: str, task_data: dict) -> dict:
@@ -2702,6 +2716,9 @@ def generate_ai_budget_warning(firebase_uid: str, data: dict):
     Hãy đưa ra một lời khuyên thực tế để người dùng cân đối lại chi tiêu."""
 
     try:
+        if not OPENROUTER_API_KEY:
+            logger.warning("[OpenRouter] OPENROUTER_API_KEY=missing feature=budget_alert")
+            return
         payload = {
             "model": MODEL_NAME,
             "messages": [{"role": "user", "content": prompt}]

@@ -24,6 +24,8 @@ export interface TransactionFromAI {
   type: 0 | 1; // 0: Expense, 1: Income
   shouldAutoSubmit: boolean;
   message: string;
+  transactionId?: string | null;
+  backendSaved?: boolean;
 }
 
 interface UseAIAssistantReturn {
@@ -68,6 +70,8 @@ export function useAIAssistant(): UseAIAssistantReturn {
           type: parsed.type as 0 | 1,
           shouldAutoSubmit: parsed.shouldAutoSubmit,
           message: parsed.message,
+          transactionId: parsed.transactionId,
+          backendSaved: parsed.backendSaved,
         };
       } catch (err) {
         const errorMsg =

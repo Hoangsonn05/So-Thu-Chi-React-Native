@@ -5,6 +5,7 @@ import time
 import json
 import tempfile
 import traceback
+import logging
 import resend
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
@@ -15,27 +16,37 @@ import uvicorn
 import requests
 from openpyxl.styles import Border, Font, Side
 from openpyxl.utils import get_column_letter
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response, Header
 from contextlib import asynccontextmanager
 from firebase_admin import credentials, firestore, messaging
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from runtime_config import (
+    BASE_WEBHOOK_URL,
+    DEBUG_ENDPOINT_TOKEN,
+    ENABLE_DEBUG_ENDPOINTS,
+    FIREBASE_KEY_PATH,
+    OPENROUTER_API_KEY,
+    RESEND_API_KEY,
+    is_present,
+    log_startup_config,
+    require_firebase_key_path,
+    sanitize_log_text,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FIREBASE_KEY_PATH = os.path.join(BASE_DIR, "firebase_key.json")
-
 # Load environment variables from .env file in the same directory (with override)
 load_dotenv(os.path.join(BASE_DIR, '.env'), override=True)
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("sothuchi.backend")
 
 # --- CẤU HÌNH RESEND (Gửi Email) ---
-resend.api_key = os.getenv("RESEND_API_KEY")
+resend.api_key = RESEND_API_KEY
 
 # --- CẤU HÌNH WEBHOOK (Động cho từng User) ---
-BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL", "")
-print(f"🚀 [INIT] BASE_WEBHOOK_URL: {BASE_WEBHOOK_URL if BASE_WEBHOOK_URL else 'NOT FOUND'}")
+log_startup_config(logger)
 
 # --- CẤU HÌNH AI (OPENROUTER - THAY THẾ GEMINI) ---
-OPENROUTER_API_KEY = "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"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b:free"
 
@@ -123,7 +134,7 @@ Your ONLY job is to parse the user's Vietnamese text message and extract financi
 
 
 if not firebase_admin._apps:
-    cred = credentials.Certificate(FIREBASE_KEY_PATH)
+    cred = credentials.Certificate(require_firebase_key_path())
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
@@ -147,11 +158,191 @@ async def lifespan(app: FastAPI):
     )
     scheduler.add_job(recurring_expenses_daily_job, 'cron', hour=9, minute=0, timezone=VN_TZ)
     scheduler.start()
-    print("[Scheduler] Đã khởi động Polling Job mỗi phút.")
+    logger.info("[Scheduler] startup status=started poll_interval=60s timezone=Asia/Saigon")
     yield
     scheduler.shutdown()
 
 app = FastAPI(title="Firestore Export & Telegram Bot API", lifespan=lifespan)
+
+
+SENSITIVE_FIELD_NAMES = {
+    "bottoken",
+    "fcmtoken",
+    "fcm_token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "token",
+    "access_token",
+    "refresh_token",
+    "debug_endpoint_token",
+}
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    return value
+
+
+def _sanitize_debug_value(value: Any, key: str = "") -> Any:
+    normalized_key = re.sub(r"[^a-z0-9_]+", "", str(key).lower())
+    if normalized_key in SENSITIVE_FIELD_NAMES or normalized_key.endswith("token"):
+        return "[REDACTED]" if value else None
+    if isinstance(value, dict):
+        return {str(k): _sanitize_debug_value(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_debug_value(item, key) for item in value]
+    if isinstance(value, str):
+        if "api.telegram.org/bot" in value.lower():
+            return sanitize_log_text(value)
+        return sanitize_log_text(value)
+    return _json_safe(value)
+
+
+def _require_debug_token(x_debug_token: Optional[str]) -> None:
+    if not DEBUG_ENDPOINT_TOKEN:
+        raise HTTPException(status_code=503, detail="debug_not_configured")
+    if not x_debug_token or x_debug_token != DEBUG_ENDPOINT_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid_debug_token")
+
+
+if ENABLE_DEBUG_ENDPOINTS:
+    @app.post("/api/debug/run-scheduler-once")
+    async def debug_run_scheduler_once(
+        request: Request,
+        x_debug_token: Optional[str] = Header(default=None, alias="X-Debug-Token"),
+    ):
+        _require_debug_token(x_debug_token)
+        raw_body = await request.body()
+        body = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+        uid_filter = (body or {}).get("uid")
+        task_id_filter = (body or {}).get("task_id")
+        from agentic_ai import _collect_due_scheduled_tasks, _scheduler_now_utc, execute_scheduled_task
+
+        now_utc = _scheduler_now_utc()
+        outcomes = []
+        if task_id_filter:
+            snap = db.collection("scheduled_tasks").document(str(task_id_filter)).get()
+            if not snap.exists:
+                return {"status": "ok", "due_count": 0, "outcomes": [{"task_id": task_id_filter, "status": "skipped", "reason": "not_found"}]}
+            task_data = snap.to_dict() or {}
+            if uid_filter and task_data.get("uid") != uid_filter:
+                return {"status": "ok", "due_count": 0, "outcomes": [{"task_id": task_id_filter, "status": "skipped", "reason": "uid_mismatch"}]}
+            outcomes.append({"task_id": task_id_filter, **execute_scheduled_task(str(task_id_filter), task_data)})
+        else:
+            due_tasks = _collect_due_scheduled_tasks(db, now_utc)
+            if uid_filter:
+                due_tasks = [(task_id, task) for task_id, task in due_tasks if task.get("uid") == uid_filter]
+            for task_id, task_data in due_tasks:
+                outcomes.append({"task_id": task_id, **execute_scheduled_task(task_id, task_data)})
+        return _sanitize_debug_value({"status": "ok", "due_count": len(outcomes), "outcomes": outcomes})
+
+    @app.post("/api/debug/create-test-task")
+    async def debug_create_test_task(
+        request: Request,
+        x_debug_token: Optional[str] = Header(default=None, alias="X-Debug-Token"),
+    ):
+        _require_debug_token(x_debug_token)
+        body = await request.json()
+        uid = str((body or {}).get("uid") or "").strip()
+        task_type = str((body or {}).get("task_type") or "daily_finance_report").strip()
+        schedule_type = str((body or {}).get("schedule_type") or "daily").strip()
+        time_value = str((body or {}).get("time") or "20:00").strip()
+        if not uid:
+            raise HTTPException(status_code=400, detail="uid_required")
+
+        from agentic_ai import (
+            DEFAULT_TIMEZONE,
+            FINANCE_REPORT_TASK_TYPES,
+            EXTERNAL_BRIEF_TASK_TYPES,
+            calculate_next_run_at,
+        )
+
+        allowed_types = FINANCE_REPORT_TASK_TYPES | EXTERNAL_BRIEF_TASK_TYPES
+        if task_type not in allowed_types:
+            raise HTTPException(status_code=400, detail="unsupported_task_type")
+        if schedule_type not in {"default_daily", "daily", "weekly", "monthly", "once"}:
+            raise HTTPException(status_code=400, detail="unsupported_schedule_type")
+
+        now_utc = datetime.now(timezone.utc)
+        task_id = f"debug_{uid}_{task_type}_{int(now_utc.timestamp())}"
+        task = {
+            "uid": uid,
+            "task_type": task_type,
+            "schedule_type": schedule_type,
+            "status": "active" if schedule_type != "once" else "pending",
+            "timezone": str((body or {}).get("timezone") or DEFAULT_TIMEZONE),
+            "time": time_value,
+            "last_run_at": None,
+            "last_success_at": None,
+            "retry_count": 0,
+            "payload": dict((body or {}).get("payload") or {}),
+            "created_at": firestore.SERVER_TIMESTAMP,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+            "debug": True,
+        }
+        if (body or {}).get("next_run_now", True):
+            task["next_run_at"] = now_utc
+        else:
+            task["next_run_at"] = calculate_next_run_at(task, now_utc)
+        db.collection("scheduled_tasks").document(task_id).set(task, merge=False)
+        return _sanitize_debug_value({"status": "ok", "task_id": task_id, "task": task})
+
+    @app.get("/api/debug/user-report-state/{uid}")
+    async def debug_user_report_state(
+        uid: str,
+        x_debug_token: Optional[str] = Header(default=None, alias="X-Debug-Token"),
+    ):
+        _require_debug_token(x_debug_token)
+        from agentic_ai import DEFAULT_TIMEZONE, EXTERNAL_BRIEF_TASK_TYPES, FINANCE_REPORT_TASK_TYPES, get_date_key, get_vn_now
+        from external_cache import EXTERNAL_SNAPSHOTS_COLLECTION
+
+        date_key = get_date_key(get_vn_now(), DEFAULT_TIMEZONE)
+        scheduled_tasks = []
+        for snap in db.collection("scheduled_tasks").where("uid", "==", uid).stream():
+            scheduled_tasks.append({"id": snap.id, **(snap.to_dict() or {})})
+
+        delivery_state = []
+        for snap in db.collection("users").document(uid).collection("delivery_state").stream():
+            data = snap.to_dict() or {}
+            if data.get("date_key") == date_key:
+                delivery_state.append({"id": snap.id, **data})
+
+        finance_reports = []
+        for snap in db.collection("users").document(uid).collection("finance_reports").limit(10).stream():
+            finance_reports.append({"id": snap.id, **(snap.to_dict() or {})})
+
+        external_reports = []
+        for snap in db.collection("users").document(uid).collection("external_reports").limit(10).stream():
+            external_reports.append({"id": snap.id, **(snap.to_dict() or {})})
+
+        external_snapshots = []
+        for topic in {"gold", "fuel", "usd_vnd", "ai_pricing"}:
+            snap = db.collection(EXTERNAL_SNAPSHOTS_COLLECTION).document(f"{topic}_{date_key}").get()
+            if snap.exists:
+                external_snapshots.append({"id": snap.id, **(snap.to_dict() or {})})
+
+        payload = {
+            "uid": uid,
+            "date_key": date_key,
+            "scheduled_tasks": scheduled_tasks,
+            "delivery_state": delivery_state,
+            "finance_reports": finance_reports,
+            "external_reports": external_reports,
+            "external_snapshots": external_snapshots,
+            "known_task_types": sorted(FINANCE_REPORT_TASK_TYPES | EXTERNAL_BRIEF_TASK_TYPES),
+        }
+        return _sanitize_debug_value(payload)
 
 def process_agentic_query(bot_token: str, firebase_uid: str, chat_id: int, text: str):
     """ Xử lý Agentic AI Workflow cho các câu truy vấn báo cáo tài chính """
@@ -330,6 +521,80 @@ def _is_finance_query_request(lower_text: str) -> bool:
     ])
 
 
+def _is_simple_ai_greeting(text: str) -> bool:
+    normalized = _normalize_intent_text(text)
+    return normalized in {"xin chao", "chao", "hello", "hi", "hey", "helo"}
+
+
+def _looks_like_transaction_text(text: str) -> bool:
+    normalized = _normalize_intent_text(text)
+    if extract_amount_vnd(text) is not None:
+        return True
+    money_pattern = r"\b\d+(?:[.,]\d+)?\s*(?:k|nghin|ngan|tr|trieu|ty|vnd|d|dong)\b"
+    if re.search(money_pattern, normalized, re.I):
+        return True
+    transaction_words = {
+        "mua", "an", "uong", "tra", "thanh toan", "chuyen khoan", "nhan",
+        "luong", "thuong", "nap", "rut", "xang", "grab", "coffee", "cafe",
+    }
+    has_action = any(word in normalized for word in transaction_words)
+    has_digit = bool(re.search(r"\d", normalized))
+    return has_action and has_digit
+
+
+def _app_transaction_response(parsed: dict, doc_id: Optional[str]) -> dict:
+    tx_type = int(parsed.get("type", 0) or 0)
+    amount = int(parsed.get("amount", 0) or 0)
+    category = str(parsed.get("category", "Khác"))
+    note = str(parsed.get("note", ""))
+    date_str = str(parsed.get("date", ""))
+    type_label = "thu" if tx_type == 1 else "chi"
+    return {
+        "success": True,
+        "message": f"Đã ghi nhận {type_label} {amount:,}đ cho {category}.".replace(",", "."),
+        "intent": "transaction",
+        "transaction": {
+            "type": tx_type,
+            "amount": amount,
+            "category": category,
+            "note": note,
+            "date": date_str,
+            "source": str(parsed.get("source", "Tiền mặt")),
+        },
+        "transaction_id": doc_id,
+    }
+
+
+def parse_and_save_transaction_for_app(firebase_uid: str, message: str) -> dict:
+    if not firebase_uid:
+        return {
+            "success": False,
+            "message": "Bạn cần đăng nhập để dùng Trợ Lý AI.",
+            "intent": "transaction",
+            "transaction": None,
+            "transaction_id": None,
+        }
+    parsed = analyze_text_with_gemini(message)
+    if parsed == "ERROR_TIMEOUT":
+        raise RuntimeError("openrouter_timeout")
+    firestore_data = _build_firestore_payload(parsed, firebase_uid)
+    doc_id = _save_transaction_atomic(firebase_uid, firestore_data, "appai")
+
+    try:
+        _send_fcm_notification(firebase_uid, doc_id, parsed)
+    except Exception as fcm_err:
+        print(f"[AI Assistant] FCM non-critical error uid={firebase_uid}: {sanitize_log_text(fcm_err)}")
+
+    if parsed.get("type") == 0:
+        try:
+            from agentic_ai import check_budget_thresholds
+            check_budget_thresholds(firebase_uid, parsed.get("category", "Khác"), float(parsed.get("amount", 0)))
+        except Exception as budget_err:
+            print(f"[AI Assistant] Budget check non-critical error uid={firebase_uid}: {sanitize_log_text(budget_err)}")
+
+    return _app_transaction_response(parsed, doc_id)
+
+
 class ExportEmailRequest(BaseModel):
     userId: str = Field(..., min_length=1)
     userEmail: str = Field(..., min_length=1)
@@ -339,6 +604,57 @@ class NotificationProcessRequest(BaseModel):
     title: str
     text: str
     package_name: str
+
+
+class AIAssistantRequest(BaseModel):
+    firebase_uid: Optional[str] = None
+    message: str = ""
+    mode: str = "auto"
+
+
+@app.post("/api/ai/assistant")
+def ai_assistant(body: AIAssistantRequest):
+    message = (body.message or "").strip()
+    mode = (body.mode or "auto").strip().lower()
+    if not message:
+        return {
+            "success": False,
+            "message": "Vui lòng nhập nội dung chi tiêu.",
+            "intent": "unknown",
+            "transaction": None,
+            "transaction_id": None,
+        }
+
+    if _is_simple_ai_greeting(message) and mode != "transaction":
+        return {
+            "success": True,
+            "message": "Xin chào. Bạn có thể nhập nội dung như: ăn sáng 30k, nhận lương 5 triệu, mua xăng 100k.",
+            "intent": "greeting",
+            "transaction": None,
+            "transaction_id": None,
+        }
+
+    should_parse_transaction = mode == "transaction" or (mode == "auto" and _looks_like_transaction_text(message))
+    if not should_parse_transaction:
+        return {
+            "success": True,
+            "message": "Bạn có thể nhập nội dung như: ăn sáng 30k, nhận lương 5 triệu, mua xăng 100k.",
+            "intent": "help",
+            "transaction": None,
+            "transaction_id": None,
+        }
+
+    try:
+        return parse_and_save_transaction_for_app((body.firebase_uid or "").strip(), message)
+    except Exception as exc:
+        print(f"[AI Assistant] request failed uid_present={is_present(body.firebase_uid)} reason={sanitize_log_text(exc)}")
+        return {
+            "success": False,
+            "message": "AI backend chưa được cấu hình hoặc đang bận. Vui lòng thử lại sau.",
+            "intent": "transaction",
+            "transaction": None,
+            "transaction_id": None,
+        }
 
 
 # ==========================================
@@ -982,7 +1298,7 @@ async def setup_telegram_bot(request: TelegramSetupRequest):
         
         # 1. Gọi Telegram API để setWebhook
         tg_api = f"https://api.telegram.org/bot{bot_token}/setWebhook"
-        print(f"[SetupBot] Calling Telegram API: {tg_api}")
+        print(f"[SetupBot] Calling Telegram API: token={is_present(bot_token)}")
         
         try:
             resp = requests.post(tg_api, json={"url": webhook_url}, timeout=15)
@@ -1048,6 +1364,10 @@ def analyze_text_with_gemini(user_text: str) -> dict:
     
     full_prompt = f"{system_prompt}\n\nUSER INPUT: \"{user_text}\"\n\nJSON OUTPUT:"
     
+    if not OPENROUTER_API_KEY:
+        logger.warning("[OpenRouter] OPENROUTER_API_KEY=missing feature=text_parse")
+        raise RuntimeError("OPENROUTER_API_KEY missing")
+
     print(f"\n[AI Request] Đang gửi yêu cầu phân tích văn bản cho AI:")
     print(f"--- TEXT: '{user_text}' ---")
 
@@ -1225,7 +1545,11 @@ def analyze_text_multi_transactions(user_text: str) -> list[dict]:
 
     full_prompt = f"{multi_prompt}\n\nUSER INPUT: \"{user_text}\"\n\nJSON ARRAY OUTPUT:"
 
-    print(f"\n[AI Multi Request] Äang gá»­i yÃªu cáº§u phÃ¢n tÃ­ch nhiá»u giao dá»‹ch:")
+    if not OPENROUTER_API_KEY:
+        logger.warning("[OpenRouter] OPENROUTER_API_KEY=missing feature=multi_text_parse")
+        raise RuntimeError("OPENROUTER_API_KEY missing")
+
+    print(f"\n[AI Multi Request] Đang gửi yêu cầu phân tích nhiều giao dịch:")
     print(f"--- TEXT: '{user_text}' ---")
 
     payload = {

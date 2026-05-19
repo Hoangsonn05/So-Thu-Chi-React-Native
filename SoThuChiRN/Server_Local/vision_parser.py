@@ -21,14 +21,11 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from firebase_admin import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
+from runtime_config import OPENROUTER_API_KEY
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 
-OPENROUTER_API_KEY = os.getenv(
-    "OPENROUTER_API_KEY",
-    "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"
-)
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 VISION_MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
 TELEGRAM_API_BASE = "https://api.telegram.org/bot"
@@ -88,6 +85,10 @@ def _call_vision_api(image_bytes: bytes, caption: str = "", current_time: str = 
     Gọi OpenRouter Vision API với ảnh base64.
     Trả về dict đã parse từ JSON response.
     """
+    if not OPENROUTER_API_KEY:
+        print("[Vision OCR] OPENROUTER_API_KEY=missing")
+        raise RuntimeError("OPENROUTER_API_KEY missing")
+
     # Encode ảnh thành base64 data URI
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
     image_data_uri = f"data:image/jpeg;base64,{b64_image}"

@@ -11,12 +11,14 @@
 
 import { callGeminiAPI, GeminiAIResponse } from '../utils/gemini-client';
 import { Platform } from 'react-native';
+import { firebaseAuth } from '../config/firebase';
 
 export interface AIPromptContext {
   userInput: string;
   currentDate: string;
   currentTime: string;
   currentBalance?: number;
+  firebaseUid?: string;
   recentTransactions?: Array<{
     amount: number;
     note: string;
@@ -96,6 +98,8 @@ export function parseAIResponse(response: GeminiAIResponse) {
     shouldAutoSubmit: response.auto_submit,
     message: response.thong_bao,
     type: response.action_type === 'THU' ? 1 : 0, // 0: Expense, 1: Income
+    transactionId: response.transaction_id || null,
+    backendSaved: Boolean(response.transaction_id),
   };
 }
 
@@ -126,13 +130,11 @@ export class AIAssistantService {
     });
 
     try {
-      const prompt = generateAIPrompt({
-        ...context,
-        currentTime,
-        userInput,
+      const firebaseUid = context.firebaseUid || firebaseAuth().currentUser?.uid;
+      const response = await callGeminiAPI(userInput, {
+        firebaseUid,
+        mode: 'auto',
       });
-
-      const response = await callGeminiAPI(prompt);
 
       this.state.lastResponse = response;
       this.state.isProcessing = false;

@@ -217,7 +217,8 @@ const AIChatModal: React.FC<AIChatModalProps> = ({
       if (
         onTransactionDetected &&
         parsedData.amount > 0 &&
-        String(parsedData.category || '').trim().length > 0
+        String(parsedData.category || '').trim().length > 0 &&
+        !parsedData.backendSaved
       ) {
         await Promise.resolve(onTransactionDetected(parsedData));
       }

@@ -1,107 +1,100 @@
 /**
- * Gemini API Client
- * Tương đương với callGeminiApi() từ HamchinhActivity.java
- * 
- * Chứa logic HTTP request/response parsing từ original Android code
+ * Legacy AI client wrapper.
+ *
+ * Direct OpenRouter calls from Expo must not include server secrets. Keep this
+ * module's public API stable so callers show their existing error state instead
+ * of crashing, but require a backend proxy endpoint before AI can run here.
  */
-
-const OPENROUTER_API_KEY = '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';
-const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL_NAME = 'nvidia/nemotron-3-super-120b-a12b:free';
 
 export interface GeminiAIResponse {
-  so_tien: number;           // Amount
-  ghi_chu: string;           // Note
-  danh_muc: string;          // Category
-  ngay: string;              // Date
-  auto_submit: boolean;      // Auto-save transaction
-  thong_bao: string;         // Notification message
-  action_type: 'CHI' | 'THU'; // Expense or Income
+  so_tien: number;
+  ghi_chu: string;
+  danh_muc: string;
+  ngay: string;
+  auto_submit: boolean;
+  thong_bao: string;
+  action_type: 'CHI' | 'THU' | 'CHAT';
+  transaction_id?: string | null;
 }
 
-/**
- * Gọi OpenRouter API với prompt (Thay thế Gemini)
- * @param prompt Prompt text
- * @returns Promise<GeminiAIResponse> Parsed AI response
- */
-export async function callGeminiAPI(prompt: string): Promise<GeminiAIResponse> {
-  const payload = {
-    model: MODEL_NAME,
-    messages: [
-      {
-        role: 'user',
-        content: prompt,
-      },
-    ],
-  };
+interface BackendAssistantResponse {
+  success: boolean;
+  message: string;
+  intent: 'greeting' | 'transaction' | 'help' | 'unknown';
+  transaction: {
+    type?: number;
+    amount?: number;
+    category?: string;
+    note?: string;
+    date?: string;
+  } | null;
+  transaction_id: string | null;
+}
 
+export async function generateContent(
+  prompt: string,
+  options?: { firebaseUid?: string; mode?: 'auto' | 'transaction' | 'chat' }
+): Promise<GeminiAIResponse> {
+  const baseUrl = process.env.EXPO_PUBLIC_API_BASE_URL;
+  if (!baseUrl) {
+    throw new Error('Chưa cấu hình EXPO_PUBLIC_API_BASE_URL.');
+  }
+  if (!options?.firebaseUid) {
+    throw new Error('Bạn cần đăng nhập để dùng Trợ Lý AI.');
+  }
+
+  let payload: BackendAssistantResponse;
   try {
-    const response = await fetch(OPENROUTER_API_URL, {
+    const response = await fetch(`${baseUrl.replace(/\/$/, '')}/api/ai/assistant`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://github.com/Hoangsonn05/So-Thu-Chi-React-Native', // Optional for OpenRouter
-        'X-Title': 'So Thu Chi App', // Optional for OpenRouter
-      },
-      body: JSON.stringify(payload),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        firebase_uid: options.firebaseUid,
+        message: prompt,
+        mode: options.mode || 'auto',
+      }),
     });
 
     if (!response.ok) {
-      const errorData = await response.text();
-      throw new Error(
-        `OpenRouter API Error: ${response.status} ${response.statusText} - ${errorData}`
-      );
+      throw new Error(`backend_status_${response.status}`);
     }
-
-    const responseData = await response.json();
-
-    // Extract AI text từ OpenAI structure (choices[0].message.content)
-    let aiAnswer: string | null = null;
-
-    try {
-      if (responseData.choices && responseData.choices[0]) {
-        aiAnswer = responseData.choices[0]?.message?.content || null;
-      }
-    } catch (e) {
-      console.error('Failed to extract text from choices:', e);
-    }
-
-    if (!aiAnswer) {
-      throw new Error('Empty response from OpenRouter API');
-    }
-
-    // Clean JSON markdown if present
-    aiAnswer = aiAnswer.replace(/```json/g, '').replace(/```/g, '').trim();
-
-    // Parse JSON response
-    let resultData: GeminiAIResponse;
-    try {
-      resultData = JSON.parse(aiAnswer);
-    } catch (ex) {
-      // If aiAnswer is not a pure JSON object, try to locate a JSON substring
-      const first = aiAnswer.indexOf('{');
-      const last = aiAnswer.lastIndexOf('}');
-      if (first >= 0 && last > first) {
-        const sub = aiAnswer.substring(first, last + 1);
-        resultData = JSON.parse(sub);
-      } else {
-        throw ex;
-      }
-    }
-
-    // Validate and set defaults
-    return {
-      so_tien: resultData.so_tien || 0,
-      ghi_chu: resultData.ghi_chu || '',
-      danh_muc: resultData.danh_muc || '',
-      ngay: resultData.ngay || '',
-      auto_submit: resultData.auto_submit || false,
-      thong_bao: resultData.thong_bao || '',
-      action_type: resultData.action_type === 'THU' ? 'THU' : 'CHI',
-    };
-  } catch (error) {
-    console.error('OpenRouter API call failed:', error);
-    throw error;
+    payload = await response.json();
+  } catch (_error) {
+    throw new Error('Không kết nối được backend AI. Vui lòng kiểm tra server.');
   }
+
+  if (!payload.success) {
+    throw new Error(payload.message || 'AI backend chưa sẵn sàng.');
+  }
+
+  if (!payload.transaction) {
+    return {
+      so_tien: 0,
+      ghi_chu: payload.message,
+      danh_muc: 'Trò chuyện',
+      ngay: '',
+      auto_submit: false,
+      thong_bao: payload.message,
+      action_type: 'CHAT',
+      transaction_id: payload.transaction_id,
+    };
+  }
+
+  return {
+    so_tien: Number(payload.transaction.amount || 0),
+    ghi_chu: payload.transaction.note || '',
+    danh_muc: payload.transaction.category || '',
+    ngay: payload.transaction.date || '',
+    auto_submit: Boolean(payload.transaction.amount),
+    thong_bao: payload.message,
+    action_type: payload.transaction.type === 1 ? 'THU' : 'CHI',
+    transaction_id: payload.transaction_id,
+  };
+}
+
+export async function callGeminiAPI(
+  prompt: string,
+  options?: { firebaseUid?: string; mode?: 'auto' | 'transaction' | 'chat' }
+): Promise<GeminiAIResponse> {
+  return generateContent(prompt, options);
 }
