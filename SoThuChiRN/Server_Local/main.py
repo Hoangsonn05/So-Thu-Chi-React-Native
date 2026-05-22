@@ -659,7 +659,15 @@ _AUTO_NOTE_MARKER_RE = re.compile(
     r"(?:\bnd\b|noi\s*dung|nội\s*dung|message|remark|description)\s*:\s*(.+)",
     re.IGNORECASE | re.UNICODE,
 )
-_AUTO_MESSAGE_MARKER_RE = re.compile(r"k[eè]m\s+l[ờơ]i\s+nh[ắa]n\s*:\s*(.+)", re.IGNORECASE | re.UNICODE)
+_AUTO_MESSAGE_MARKER_RE = re.compile(
+    r"(?:k[eè]m\s+)?l[ờơ]i\s+nh[ắa]n\s*:\s*(.+)",
+    re.IGNORECASE | re.UNICODE,
+)
+_AUTO_MOMO_SENDER_RE = re.compile(
+    r"nh[ậa]n\s+ti[ềe]n(?:\s+chuy[ểe]n\s+kho[ảa]n)?\s+t[ừu]\s+(.+)$",
+    re.IGNORECASE | re.UNICODE,
+)
+_AUTO_MB_SENDER_RE = re.compile(r"\btu\s*:\s*([^|]+)", re.IGNORECASE)
 _AUTO_FT_REF_RE = re.compile(r"\bFT\d{6,}\b", re.IGNORECASE)
 _AUTO_TRAILING_REF_RE = re.compile(r"\s+\b[A-Za-z][A-Za-z0-9]{4,}/\d{4,}\b\s*$")
 _AUTO_BALANCE_RE = re.compile(
@@ -700,7 +708,7 @@ def _parse_auto_amount_and_type(text: str) -> tuple[Optional[int], Optional[int]
     normalized = _normalize_intent_text(text or "")
     expense_keywords = (
         "bi tru", "ghi no", "thanh toan", "da chuyen", "chuyen tien",
-        "chuyen khoan den", " den:", "den:", " ck ", "gd:-",
+        "chuyen khoan den", " den:", "den:", "gd:-",
     )
     income_keywords = (
         "nhan tien", "chuyen khoan tu", "ghi co", "cong tien",
@@ -724,7 +732,29 @@ def sanitize_transaction_note(note: str) -> str:
     clean = re.sub(r"\b(?:tk|sd|tu|den)\s*:\s*", " ", clean, flags=re.IGNORECASE)
     clean = clean.strip(" \"'|,.;:-")
     clean = re.sub(r"\s+", " ", clean).strip()
-    return clean[:50]
+    return clean[:80].rstrip(" -")
+
+
+def _sanitize_transaction_party(value: str) -> str:
+    party = str(value or "").strip()
+    has_trailing_ellipsis = party.endswith("...")
+    clean = sanitize_transaction_note(party).strip(" -")
+    return f"{clean}..." if has_trailing_ellipsis and clean and not clean.endswith("...") else clean
+
+
+def _extract_momo_sender(title: str) -> str:
+    sender_match = _AUTO_MOMO_SENDER_RE.search(title or "")
+    return _sanitize_transaction_party(sender_match.group(1)) if sender_match else ""
+
+
+def _extract_mb_sender(text: str) -> str:
+    sender_match = _AUTO_MB_SENDER_RE.search(text or "")
+    return _sanitize_transaction_party(sender_match.group(1)) if sender_match else ""
+
+
+def _extract_auto_merchant(text: str) -> str:
+    merchant_match = re.search(r"(?:tại|tai)\s+(.+)$", text or "", re.IGNORECASE | re.UNICODE)
+    return sanitize_transaction_note(merchant_match.group(1)) if merchant_match else ""
 
 
 def _extract_auto_note_candidate(text: str) -> str:
@@ -738,9 +768,9 @@ def _extract_auto_note_candidate(text: str) -> str:
     if marker_match:
         return marker_match.group(1).split("|", 1)[0].strip()
 
-    merchant_match = re.search(r"(?:tại|tai)\s+(.+)$", text or "", re.IGNORECASE | re.UNICODE)
-    if merchant_match:
-        return merchant_match.group(1).strip()
+    merchant = _extract_auto_merchant(text)
+    if merchant:
+        return merchant
     return ""
 
 
@@ -749,10 +779,18 @@ def _extract_auto_notification_note(source: str, tx_type: Optional[int], title: 
     combined = f"{title} {text}"
     normalized = _normalize_intent_text(combined)
 
-    if source == "Momo" and tx_type == 1 and candidate:
-        return sanitize_transaction_note(f"Nhận tiền MoMo - {candidate}")
+    if source == "Momo" and tx_type == 1:
+        sender = _extract_momo_sender(title)
+        sender_note = f"Nhận tiền MoMo từ {sender}" if sender else "Nhận tiền MoMo"
+        return sanitize_transaction_note(f"{sender_note} - {candidate}" if candidate else sender_note)
+    if source == "Momo" and tx_type == 0:
+        merchant = _extract_auto_merchant(text)
+        spend_detail = merchant or candidate
+        return sanitize_transaction_note(f"Thanh toán MoMo - {spend_detail}" if spend_detail else "Thanh toán MoMo")
     if source == "MB Bank" and tx_type == 1 and candidate:
-        return sanitize_transaction_note(f"Nhận chuyển khoản - {candidate}")
+        sender = _extract_mb_sender(text)
+        sender_note = f"Nhận chuyển khoản từ {sender}" if sender else "Nhận chuyển khoản"
+        return sanitize_transaction_note(f"{sender_note} - {candidate}")
     if candidate:
         return candidate
     if "thanh toan" in normalized:
@@ -820,6 +858,8 @@ def parse_auto_notification_deterministic(title: str, text: str, package_name: s
     if map_package_to_source(package_name):
         locked_fields.add("source")
     note = _extract_auto_notification_note(source, tx_type, title or "", text or "")
+    if source == "Momo" and amount and tx_type in (0, 1) and note:
+        locked_fields.add("note")
     category = classify_category_from_transaction(tx_type, note, combined) if tx_type in (0, 1) else ""
     sanitized_note = sanitize_transaction_note(note)
     return {
@@ -859,7 +899,7 @@ def _merge_auto_notification_parse(deterministic: dict, ai_parsed: Optional[dict
         elif value:
             merged[field] = value
     locked_fields = set(deterministic.get("_locked_fields") or set())
-    for field in ("amount", "type", "source"):
+    for field in ("amount", "type", "source", "note"):
         if field in locked_fields:
             merged[field] = deterministic.get(field)
     if not merged.get("amount"):

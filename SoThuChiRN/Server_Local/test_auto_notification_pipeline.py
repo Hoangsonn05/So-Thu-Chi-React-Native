@@ -163,8 +163,8 @@ class AutoNotificationPipelineTests(unittest.TestCase):
                 "type": 1,
                 "source": "Momo",
                 "category": main.INCOME_CATEGORIES[-1],
-                "note": "Nhận tiền MoMo - Test AI gg",
-                "redacted": ["FT26142754623982", "NGUYEN HOANG"],
+                "note": "Nhận tiền MoMo từ NGUYEN HOANG S... - Test AI gg",
+                "redacted": ["FT26142754623982"],
             },
             {
                 "name": "mb_income",
@@ -175,7 +175,7 @@ class AutoNotificationPipelineTests(unittest.TestCase):
                 "type": 1,
                 "source": "MB Bank",
                 "category": main.INCOME_CATEGORIES[-1],
-                "note": "Nhận chuyển khoản - Test AI gg",
+                "note": "Nhận chuyển khoản từ NGUYEN HOANG SON - Test AI gg",
                 "redacted": ["2610200595", "FT26142090977510", "kC97BE76/588218", "SD:"],
             },
             {
@@ -250,6 +250,81 @@ class AutoNotificationPipelineTests(unittest.TestCase):
                 self.assertEqual(merged["category"], case["category"])
                 self.assertIn(case["note"], merged["note"])
                 for forbidden in case["redacted"]:
+                    self.assertNotIn(forbidden, merged["note"])
+
+    def test_momo_note_extraction_keeps_sender_and_message(self):
+        cases = [
+            {
+                "name": "trimmed_sender_message",
+                "title": "Nhận tiền chuyển khoản từ NGUYEN HOANG S...",
+                "text": 'Số tiền 5.500 đ, kèm lời nhắn: "Test doc nd ck ai FT26142008910608".',
+                "amount": 5500,
+                "note": "Nhận tiền MoMo từ NGUYEN HOANG S... - Test doc nd ck ai",
+                "forbidden": ["FT26142008910608"],
+            },
+            {
+                "name": "full_sender_message",
+                "title": "Nhận tiền chuyển khoản từ NGUYEN HOANG SON",
+                "text": 'Số tiền 10.000 đ, kèm lời nhắn: "Test AI gg FT26142754623982."',
+                "amount": 10000,
+                "note": "Nhận tiền MoMo từ NGUYEN HOANG SON - Test AI gg",
+                "forbidden": ["FT26142754623982"],
+            },
+            {
+                "name": "full_sender_without_message",
+                "title": "Nhận tiền chuyển khoản từ NGUYEN HOANG SON",
+                "text": "Số tiền 5.500 đ",
+                "amount": 5500,
+                "note": "Nhận tiền MoMo từ NGUYEN HOANG SON",
+                "forbidden": [],
+            },
+            {
+                "name": "sender_account_removed",
+                "title": "Nhận tiền chuyển khoản từ NGUYEN HOANG SON - 2610200595",
+                "text": 'Số tiền 5.500 đ, kèm lời nhắn: "Test doc nd ck ai FT26142008910608".',
+                "amount": 5500,
+                "note": "Nhận tiền MoMo từ NGUYEN HOANG SON - Test doc nd ck ai",
+                "forbidden": ["2610200595", "FT26142008910608"],
+            },
+            {
+                "name": "jollibee_expense",
+                "title": "Thanh toán thành công",
+                "text": "Bạn đã thanh toán 35.000đ tại Jollibee",
+                "amount": 35000,
+                "type": 0,
+                "category": main.EXPENSE_CATEGORIES[0],
+                "note": "Thanh toán MoMo - Jollibee",
+                "forbidden": [],
+            },
+            {
+                "name": "circle_k_expense",
+                "title": "Thanh toán thành công",
+                "text": "Bạn đã thanh toán 60.000đ tại Circle K",
+                "amount": 60000,
+                "type": 0,
+                "category": main.EXPENSE_CATEGORIES[1],
+                "note": "Thanh toán MoMo - Circle K",
+                "forbidden": [],
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                parsed = main.parse_auto_notification_deterministic(
+                    case["title"],
+                    case["text"],
+                    "com.mservice.momotransfer",
+                )
+                merged = main._merge_auto_notification_parse(
+                    parsed,
+                    {"note": "Nhận 5.500đ từ Nguyễn Hoàng Sơn"},
+                )
+                self.assertEqual(merged["amount"], case["amount"])
+                self.assertEqual(merged["type"], case.get("type", 1))
+                self.assertEqual(merged["source"], "Momo")
+                self.assertEqual(merged["category"], case.get("category", main.INCOME_CATEGORIES[-1]))
+                self.assertEqual(merged["note"], case["note"])
+                for forbidden in case["forbidden"]:
                     self.assertNotIn(forbidden, merged["note"])
 
     def test_gd_sign_locks_amount_type_and_mapped_source_from_ai_override(self):
