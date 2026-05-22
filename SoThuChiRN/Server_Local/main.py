@@ -612,6 +612,32 @@ class AIAssistantRequest(BaseModel):
     mode: str = "auto"
 
 
+def map_package_to_source(package_name: str) -> str:
+    normalized = str(package_name or "").strip().lower()
+    package_sources = {
+        "com.mservice.momotransfer": "Momo",
+        "vn.com.vng.zalopay": "ZaloPay",
+        "com.mbmobile": "MB Bank",
+        "com.tecb.smartbanking": "Techcombank",
+        "vn.com.techcombank.bb.app": "Techcombank",
+        "com.bidv.smartbanking": "BIDV",
+        "com.vnpay.bidv": "BIDV",
+    }
+    return package_sources.get(normalized, "")
+
+
+def _apply_auto_notification_source(parsed: dict, package_name: Optional[str]) -> dict:
+    current_source = str(parsed.get("source") or "").strip()
+    generic_sources = {"tiền mặt", "tien mat", "cash"}
+    if current_source and current_source.lower() not in generic_sources:
+        return parsed
+
+    fallback_source = map_package_to_source(package_name or "") or str(package_name or "").strip()
+    if fallback_source:
+        return {**parsed, "source": fallback_source}
+    return parsed
+
+
 @app.post("/api/ai/assistant")
 def ai_assistant(body: AIAssistantRequest):
     message = (body.message or "").strip()
@@ -1369,7 +1395,7 @@ def analyze_text_with_gemini(user_text: str) -> dict:
         raise RuntimeError("OPENROUTER_API_KEY missing")
 
     print(f"\n[AI Request] Đang gửi yêu cầu phân tích văn bản cho AI:")
-    print(f"--- TEXT: '{user_text}' ---")
+    print(f"--- TEXT PREVIEW: '{sanitize_log_text(user_text[:200])}' ---")
 
     payload = {
         "model": MODEL_NAME,
@@ -1411,7 +1437,7 @@ def analyze_text_with_gemini(user_text: str) -> dict:
     try:
         # OpenAI style response: choices[0].message.content
         raw_text = result['choices'][0]['message']['content'].strip()
-        print(f"[AI Response Raw]: '{raw_text}'")
+        print(f"[AI Response Raw Preview]: '{sanitize_log_text(raw_text[:200])}'")
     except (KeyError, IndexError) as e:
         print(f"[OpenRouter Response Error] Could not extract text: {e}")
         raise ValueError("AI trả về định dạng không mong muốn.")
@@ -1435,7 +1461,10 @@ def analyze_text_with_gemini(user_text: str) -> dict:
         if first >= 0 and last > first:
             parsed = json.loads(cleaned[first:last+1])
         else:
-            print(f"[AI Parse Error] Không tìm thấy JSON hợp lệ trong phản hồi. Văn bản: '{cleaned}'")
+            print(
+                "[AI Parse Error] Không tìm thấy JSON hợp lệ trong phản hồi. "
+                f"Preview: '{sanitize_log_text(cleaned[:200])}'"
+            )
             raise
 
     # ---- Map Gemini Response (trả về schema cũ: type, amount, category, note, date) ----
@@ -1472,6 +1501,7 @@ def analyze_text_with_gemini(user_text: str) -> dict:
         "category": category,
         "note": note,
         "date": date_str,
+        "source": str(parsed.get("source") or "Tiền mặt").strip(),
     }
 
 
@@ -1550,7 +1580,7 @@ def analyze_text_multi_transactions(user_text: str) -> list[dict]:
         raise RuntimeError("OPENROUTER_API_KEY missing")
 
     print(f"\n[AI Multi Request] Đang gửi yêu cầu phân tích nhiều giao dịch:")
-    print(f"--- TEXT: '{user_text}' ---")
+    print(f"--- TEXT PREVIEW: '{sanitize_log_text(user_text[:200])}' ---")
 
     payload = {
         "model": MODEL_NAME,
@@ -1858,6 +1888,38 @@ def _send_saved_transaction_telegram_message(bot_token: str, chat_id: int, parse
         f"ID: {doc_id}"
     )
     send_telegram_message(bot_token, chat_id, msg, reply_markup=_build_transaction_action_keyboard(doc_id))
+
+
+def _send_auto_detect_telegram_notification(firebase_uid: str, parsed: dict) -> bool:
+    try:
+        user_doc = db.collection("users").document(firebase_uid).get()
+        user_data = user_doc.to_dict() if user_doc.exists else {}
+        telegram_config = (user_data or {}).get("telegramConfig") or {}
+        bot_token = telegram_config.get("botToken")
+        chat_id = telegram_config.get("chatId")
+
+        if not bot_token or not chat_id:
+            print("[Telegram Auto Notify] Telegram config missing, skip auto notify")
+            return False
+
+        type_label = "Thu nhập" if int(parsed.get("type", 0) or 0) == 1 else "Chi tiêu"
+        amount = int(parsed.get("amount", 0) or 0)
+        amount_display = f"{amount:,}".replace(",", ".")
+        source = str(parsed.get("source") or "Không rõ")
+        note = str(parsed.get("note") or "").strip()[:120] or "Không có nội dung"
+        msg = (
+            "Đã ghi nhận giao dịch tự động:\n"
+            f"- Loại: {type_label}\n"
+            f"- Số tiền: {amount_display}đ\n"
+            f"- Nguồn: {source}\n"
+            f"- Nội dung: {note}"
+        )
+        send_telegram_message(bot_token, chat_id, msg)
+        print("[Telegram Auto Notify] success")
+        return True
+    except Exception as notify_err:
+        print(f"[Telegram Auto Notify] fail: {sanitize_log_text(notify_err)}")
+        return False
 
 
 # ==========================================
@@ -2314,7 +2376,14 @@ def _try_merchant_bypass(firebase_uid: str, text: str, is_auto_detect: bool) -> 
     }
 
 
-def _process_ai_and_save_multi(bot_token: Optional[str], firebase_uid: str, chat_id: Optional[int], text: str, is_auto_detect: bool = False):
+def _process_ai_and_save_multi(
+    bot_token: Optional[str],
+    firebase_uid: str,
+    chat_id: Optional[int],
+    text: str,
+    is_auto_detect: bool = False,
+    package_name: Optional[str] = None,
+):
     omitted_count = 0
     try:
         parsed_items = analyze_text_multi_transactions(text)
@@ -2340,15 +2409,28 @@ def _process_ai_and_save_multi(bot_token: Optional[str], firebase_uid: str, chat
 
     for parsed in parsed_items:
         try:
-            print(f"[AI Multi Item Result] {parsed}")
+            if is_auto_detect:
+                parsed = _apply_auto_notification_source(parsed, package_name)
+            print(
+                f"[AI Multi Item Result] type={parsed.get('type')}, amount={parsed.get('amount')}, "
+                f"source={parsed.get('source', '')}"
+            )
             firestore_data = _build_firestore_payload(parsed, firebase_uid)
-            doc_id = _save_transaction_atomic(firebase_uid, firestore_data, id_prefix)
+            try:
+                doc_id = _save_transaction_atomic(firebase_uid, firestore_data, id_prefix)
+                print("[Auto Notification] Firestore save success" if is_auto_detect else "[Firestore] Save success")
+            except Exception as firestore_err:
+                print(f"[Auto Notification] Firestore save fail: {sanitize_log_text(firestore_err)}")
+                raise
             saved_count += 1
 
             try:
                 _send_fcm_notification(firebase_uid, doc_id, parsed)
             except Exception as fcm_err:
                 print(f"[FCM] Non-critical error, ignoring: {fcm_err}")
+
+            if is_auto_detect:
+                _send_auto_detect_telegram_notification(firebase_uid, parsed)
 
             # [MERCHANT LEARNING] Học rule từ từng item trong batch sau khi lưu thành công
             if ENABLE_MERCHANT_LEARNING:
@@ -2383,13 +2465,23 @@ def _process_ai_and_save_multi(bot_token: Optional[str], firebase_uid: str, chat
     if saved_count == 0:
         raise ValueError("No transaction was saved.")
 
-def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Optional[int], text: str, is_auto_detect: bool = False):
+def process_ai_and_save(
+    bot_token: Optional[str],
+    firebase_uid: str,
+    chat_id: Optional[int],
+    text: str,
+    is_auto_detect: bool = False,
+    package_name: Optional[str] = None,
+):
     """
     Background Task — KHÔNG có network call nào trong Firestore Transaction.
     Flow: AI parse (network) → Atomic Firestore write → Telegram reply (network).
     """
     try:
-        print(f"[Process] chat_id={chat_id}, uid={firebase_uid}, text='{text[:50]}'")
+        print(
+            f"[Process] chat_id_present={bool(chat_id)}, uid_present={bool(firebase_uid)}, "
+            f"text_length={len(text)}"
+        )
         print(f"[MULTI_PARSE] enabled={ENABLE_MULTI_TRANSACTION_PARSE}")
 
         # 2. Phân loại text → route thích hợp
@@ -2401,7 +2493,7 @@ def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Op
 
         if is_multi and ENABLE_MULTI_TRANSACTION_PARSE:
             print("[MULTI_PARSE] using multi flow")
-            _process_ai_and_save_multi(bot_token, firebase_uid, chat_id, text, is_auto_detect)
+            _process_ai_and_save_multi(bot_token, firebase_uid, chat_id, text, is_auto_detect, package_name)
             return
 
         # Single-transaction path (hoặc multi text với MULTI_PARSE=false → legacy AI)
@@ -2414,7 +2506,12 @@ def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Op
                 print("[MerchantLearning] multi text + MULTI_PARSE disabled → FALLBACK_AI")
             else:
                 print("[MerchantLearning] FALLBACK_AI")
-            parsed = analyze_text_with_gemini(text)
+            try:
+                parsed = analyze_text_with_gemini(text)
+                print("[Auto Notification] AI parse success" if is_auto_detect else "[AI Parse] success")
+            except Exception as ai_err:
+                print(f"[Auto Notification] AI parse fail: {sanitize_log_text(ai_err)}")
+                raise
         else:
             print("[MerchantLearning] BYPASS success, skipping AI call")
         if parsed == "ERROR_TIMEOUT":
@@ -2423,14 +2520,25 @@ def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Op
                 send_telegram_message(bot_token, chat_id, overload_msg)
             return
 
-        print(f"[AI Result] {parsed}")
+        if is_auto_detect:
+            parsed = _apply_auto_notification_source(parsed, package_name)
+
+        print(
+            f"[AI Result] type={parsed.get('type')}, amount={parsed.get('amount')}, "
+            f"source={parsed.get('source', '')}"
+        )
 
         # 3. Build payload — NGOÀI transaction
         firestore_data = _build_firestore_payload(parsed, firebase_uid)
 
         # 4. ATOMIC: counter + write trong 1 transaction duy nhất
         id_prefix = "at" if is_auto_detect else "reqtele"
-        doc_id = _save_transaction_atomic(firebase_uid, firestore_data, id_prefix)
+        try:
+            doc_id = _save_transaction_atomic(firebase_uid, firestore_data, id_prefix)
+            print("[Auto Notification] Firestore save success" if is_auto_detect else "[Firestore] Save success")
+        except Exception as firestore_err:
+            print(f"[Auto Notification] Firestore save fail: {sanitize_log_text(firestore_err)}")
+            raise
 
         # 4b. Gửi FCM silent notification — kích hoạt sync khi app bị kill/background
         # Không ảnh hưởng flow chính nếu FCM lỗi
@@ -2438,6 +2546,9 @@ def process_ai_and_save(bot_token: Optional[str], firebase_uid: str, chat_id: Op
             _send_fcm_notification(firebase_uid, doc_id, parsed)
         except Exception as fcm_err:
             print(f"[FCM] Non-critical error, ignoring: {fcm_err}")
+
+        if is_auto_detect:
+            _send_auto_detect_telegram_notification(firebase_uid, parsed)
 
         # [MERCHANT LEARNING] Hoc rule tu transaction da luu thanh cong
         if ENABLE_MERCHANT_LEARNING:
@@ -2646,11 +2757,13 @@ async def process_notification(req: NotificationProcessRequest, background_tasks
     """
     # Gộp title và text để AI dễ phân tích
     combined_text = f"Thông báo từ ứng dụng {req.package_name}: {req.title} - {req.text}"
-    print(f"\n[Backend API] Nhận thông báo từ {req.package_name}")
-    print(f"[Backend API] Nội dung kết hợp: '{combined_text}'")
+    print("[Notification API] /api/notification/process received")
+    print(f"[Notification API] firebase_uid_present={bool(req.firebase_uid.strip())}")
+    print(f"[Notification API] package_name={req.package_name}")
+    print(f"[Notification API] text_length={len(combined_text)}")
     
     # process_ai_and_save xử lý phân tích và lưu, nếu thành công sẽ gửi FCM push notification
-    background_tasks.add_task(process_ai_and_save, None, req.firebase_uid, None, combined_text, True)
+    background_tasks.add_task(process_ai_and_save, None, req.firebase_uid, None, combined_text, True, req.package_name)
     
     return {"status": "processing"}
 

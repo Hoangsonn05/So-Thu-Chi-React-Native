@@ -17,7 +17,7 @@
  * - Conditional rendering Auth Stack vs Main Stack
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './src/styles/global.css';
 import { View, ActivityIndicator, StyleSheet, StatusBar, Alert } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
@@ -51,6 +51,7 @@ export default function App() {
   const [showNetworkGuard, setShowNetworkGuard] = useState<boolean>(false);
   const [hasDismissedGuard, setHasDismissedGuard] = useState<boolean>(false);
   const [isAIChatModalVisible, setIsAIChatModalVisible] = useState<boolean>(false);
+  const notificationAccessPromptedRef = useRef(false);
   const [currentDate, setCurrentDate] = useState<string>(() => {
     const today = new Date();
     const formatter = new Intl.DateTimeFormat('vi-VN', {
@@ -207,9 +208,19 @@ export default function App() {
         }
 
         // ── Cấu hình Native Notification Listener (Chỉ Android) ────────────
-        await notificationBridge.setApiConfig(user.uid, BACKEND_URL);
-        // Có thể prompt user bật quyền nếu chưa bật (tuỳ chọn)
-        // await notificationBridge.promptToEnableIfRequired();
+        const notificationConfigSaved = await notificationBridge.setApiConfig(user.uid, BACKEND_URL);
+        if (notificationConfigSaved) {
+          const notificationAccessEnabled = await notificationBridge.isEnabled();
+          if (notificationAccessEnabled) {
+            console.log('[NotificationBridge] Notification access enabled');
+          } else {
+            console.warn('[NotificationBridge] Notification access not enabled');
+            if (!notificationAccessPromptedRef.current) {
+              notificationAccessPromptedRef.current = true;
+              await notificationBridge.promptToEnableIfRequired();
+            }
+          }
+        }
 
       } else {
         if (sessionUnsubscribe) {
@@ -218,6 +229,7 @@ export default function App() {
         }
         // ── Hủy Firestore listener khi đăng xuất ───────────────────────────
         syncService.stopRealtimeListener();
+        notificationAccessPromptedRef.current = false;
       }
 
       if (isInitializing) setIsInitializing(false);
