@@ -100,7 +100,7 @@ class AutoNotificationPipelineTests(unittest.TestCase):
             (
                 "com.mservice.momotransfer",
                 "Ban da thanh toan 35.000d tai Circle K",
-                {"amount": 35000, "type": 0, "note": "Thanh toan Circle K", "source": "Momo"},
+                {"amount": 35000, "type": 0, "note": "Circle K", "source": "Momo"},
             ),
             (
                 "vn.com.vng.zalopay",
@@ -151,7 +151,141 @@ class AutoNotificationPipelineTests(unittest.TestCase):
             self.assertEqual(save_payloads[0]["amount"], expected["amount"])
             self.assertEqual(save_payloads[0]["type"], expected["type"])
             self.assertEqual(save_payloads[0]["source"], expected["source"])
-            self.assertIn(expected["note"], save_payloads[0]["note"])
+
+    def test_deterministic_parser_required_bank_notifications(self):
+        cases = [
+            {
+                "name": "momo_income",
+                "package": "com.mservice.momotransfer",
+                "title": "Nhận tiền chuyển khoản từ NGUYEN HOANG S...",
+                "text": 'Số tiền 5.000 đ, kèm lời nhắn: "Test AI gg FT26142754623982".',
+                "amount": 5000,
+                "type": 1,
+                "source": "Momo",
+                "category": main.INCOME_CATEGORIES[-1],
+                "note": "Nhận tiền MoMo - Test AI gg",
+                "redacted": ["FT26142754623982", "NGUYEN HOANG"],
+            },
+            {
+                "name": "mb_income",
+                "package": "com.mbmobile",
+                "title": "Thông báo biến động số dư",
+                "text": "TK 09xxx005|GD: +7,000VND 22/05/26 09:12 |SD: 15,000VND|TU: NGUYEN HOANG SON - 2610200595|ND: Test AI gg FT26142090977510 kC97BE76/588218",
+                "amount": 7000,
+                "type": 1,
+                "source": "MB Bank",
+                "category": main.INCOME_CATEGORIES[-1],
+                "note": "Nhận chuyển khoản - Test AI gg",
+                "redacted": ["2610200595", "FT26142090977510", "kC97BE76/588218", "SD:"],
+            },
+            {
+                "name": "mb_expense",
+                "package": "com.mbmobile",
+                "title": "Thông báo biến động số dư",
+                "text": "TK 09xxx005|GD:-15,000VND 22/05/26 09:21 |SD: 0VND|DEN: NGUYEN HOANG SON - 2610200595|ND: MBCT test ai gg ck tru tien D2JLC58U/308441",
+                "amount": 15000,
+                "type": 0,
+                "source": "MB Bank",
+                "category": main.EXPENSE_CATEGORIES[-1],
+                "note": "MBCT test ai gg ck tru tien",
+                "redacted": ["09xxx005", "2610200595", "D2JLC58U/308441", "SD:"],
+            },
+            {
+                "name": "jollibee",
+                "package": "com.mservice.momotransfer",
+                "title": "Thanh toán thành công",
+                "text": "Bạn đã thanh toán 35.000đ tại Jollibee",
+                "amount": 35000,
+                "type": 0,
+                "source": "Momo",
+                "category": main.EXPENSE_CATEGORIES[0],
+                "note": "Jollibee",
+                "redacted": [],
+            },
+            {
+                "name": "circle_k_mb",
+                "package": "com.mbmobile",
+                "title": "Thông báo biến động số dư",
+                "text": "TK xxx GD: -60,000VND ND: Thanh toan Circle K",
+                "amount": 60000,
+                "type": 0,
+                "source": "MB Bank",
+                "category": main.EXPENSE_CATEGORIES[1],
+                "note": "Circle K",
+                "redacted": [],
+            },
+            {
+                "name": "circle_k_bidv",
+                "package": "com.vnpay.bidv",
+                "title": "Bien dong so du",
+                "text": "Bien dong so du: -200,000 VND. Noi dung: Thanh toan QR Circle K",
+                "amount": 200000,
+                "type": 0,
+                "source": "BIDV",
+                "category": main.EXPENSE_CATEGORIES[1],
+                "note": "Circle K",
+                "redacted": [],
+            },
+            {
+                "name": "techcombank",
+                "package": "vn.com.techcombank.bb.app",
+                "title": "Thông báo giao dịch",
+                "text": "TK 1903xxx bị trừ 500.000 VND. ND: Chuyen tien an trua",
+                "amount": 500000,
+                "type": 0,
+                "source": "Techcombank",
+                "category": main.EXPENSE_CATEGORIES[-1],
+                "note": "Chuyen tien an trua",
+                "redacted": [],
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                parsed = main.parse_auto_notification_deterministic(case["title"], case["text"], case["package"])
+                merged = main._merge_auto_notification_parse(parsed, None)
+                self.assertEqual(merged["amount"], case["amount"])
+                self.assertEqual(merged["type"], case["type"])
+                self.assertEqual(merged["source"], case["source"])
+                self.assertEqual(merged["category"], case["category"])
+                self.assertIn(case["note"], merged["note"])
+                for forbidden in case["redacted"]:
+                    self.assertNotIn(forbidden, merged["note"])
+
+    def test_gd_sign_locks_amount_type_and_mapped_source_from_ai_override(self):
+        deterministic = main.parse_auto_notification_deterministic(
+            "Thông báo biến động số dư",
+            "TK xxx GD:-15,000VND ND: MBCT test ai gg ck tru tien",
+            "com.mbmobile",
+        )
+        merged = main._merge_auto_notification_parse(
+            deterministic,
+            {"amount": 999999, "type": 1, "source": "Wrong", "note": "AI note"},
+        )
+        self.assertEqual(merged["amount"], 15000)
+        self.assertEqual(merged["type"], 0)
+        self.assertEqual(merged["source"], "MB Bank")
+
+    def test_facebook_normal_notification_skips_firestore_and_telegram(self):
+        with patch("main._save_transaction_atomic") as save, \
+            patch("main._send_fcm_notification") as fcm, \
+            patch("main._send_auto_detect_telegram_notification") as telegram, \
+            patch("main.analyze_text_with_gemini") as ai:
+            main.process_ai_and_save(
+                None,
+                "uid",
+                None,
+                "Facebook - Bạn có một thông báo mới",
+                True,
+                "com.facebook.katana",
+                "Facebook",
+                "Bạn có một thông báo mới",
+            )
+
+        save.assert_not_called()
+        fcm.assert_not_called()
+        telegram.assert_not_called()
+        ai.assert_not_called()
 
     def test_auto_telegram_skip_when_config_is_missing(self):
         with patch("main.db", _FakeDb({})), patch("main.send_telegram_message") as send_message:

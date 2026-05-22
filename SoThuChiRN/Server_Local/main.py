@@ -622,6 +622,11 @@ def map_package_to_source(package_name: str) -> str:
         "vn.com.techcombank.bb.app": "Techcombank",
         "com.bidv.smartbanking": "BIDV",
         "com.vnpay.bidv": "BIDV",
+        "com.vnpay.wallet": "VNPay",
+        "com.vietcombank.smartbanking": "Vietcombank",
+        "com.vtb.smartbanking": "VietinBank",
+        "com.tpb.mb.gprsandroid": "TPBank",
+        "com.ftg.vims": "Viettel Money",
     }
     return package_sources.get(normalized, "")
 
@@ -636,6 +641,240 @@ def _apply_auto_notification_source(parsed: dict, package_name: Optional[str]) -
     if fallback_source:
         return {**parsed, "source": fallback_source}
     return parsed
+
+
+_AUTO_GD_MONEY_RE = re.compile(
+    r"\bgd\s*:\s*([+-])\s*([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]+)\s*(?:vnd|đ|d)",
+    re.IGNORECASE | re.UNICODE,
+)
+_AUTO_SIGNED_MONEY_RE = re.compile(
+    r"(?<![A-Za-z0-9])([+-])\s*([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]+)\s*(?:vnd|đ|d)",
+    re.IGNORECASE | re.UNICODE,
+)
+_AUTO_MONEY_RE = re.compile(
+    r"(?<![A-Za-z0-9])([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]+)\s*(?:vnd|đ|d)",
+    re.IGNORECASE | re.UNICODE,
+)
+_AUTO_NOTE_MARKER_RE = re.compile(
+    r"(?:\bnd\b|noi\s*dung|nội\s*dung|message|remark|description)\s*:\s*(.+)",
+    re.IGNORECASE | re.UNICODE,
+)
+_AUTO_MESSAGE_MARKER_RE = re.compile(r"k[eè]m\s+l[ờơ]i\s+nh[ắa]n\s*:\s*(.+)", re.IGNORECASE | re.UNICODE)
+_AUTO_FT_REF_RE = re.compile(r"\bFT\d{6,}\b", re.IGNORECASE)
+_AUTO_TRAILING_REF_RE = re.compile(r"\s+\b[A-Za-z][A-Za-z0-9]{4,}/\d{4,}\b\s*$")
+_AUTO_BALANCE_RE = re.compile(
+    r"(?:\bsd\b|số\s*dư|so\s*du)\s*:\s*[^|.;]*(?:vnd|đ|d)?",
+    re.IGNORECASE | re.UNICODE,
+)
+_AUTO_MASKED_ACCOUNT_RE = re.compile(r"\b(?:tk\s*)?\d{1,5}x{2,}\d{0,5}\b", re.IGNORECASE)
+_AUTO_LONG_NUMBER_RE = re.compile(r"\b\d{6,}\b")
+
+
+def _auto_today_str() -> str:
+    return datetime.now(tz=VN_TZ).strftime("%d/%m/%Y")
+
+
+def _money_token_to_int(value: str) -> Optional[int]:
+    digits = re.sub(r"\D", "", str(value or ""))
+    if not digits:
+        return None
+    amount = int(digits)
+    return amount if amount > 0 else None
+
+
+def _parse_auto_amount_and_type(text: str) -> tuple[Optional[int], Optional[int], set[str]]:
+    gd_match = _AUTO_GD_MONEY_RE.search(text or "")
+    if gd_match:
+        return _money_token_to_int(gd_match.group(2)), 1 if gd_match.group(1) == "+" else 0, {"amount", "type"}
+
+    signed_match = _AUTO_SIGNED_MONEY_RE.search(text or "")
+    if signed_match:
+        return (
+            _money_token_to_int(signed_match.group(2)),
+            1 if signed_match.group(1) == "+" else 0,
+            {"amount", "type"},
+        )
+
+    money_match = _AUTO_MONEY_RE.search(text or "")
+    amount = _money_token_to_int(money_match.group(1)) if money_match else None
+    normalized = _normalize_intent_text(text or "")
+    expense_keywords = (
+        "bi tru", "ghi no", "thanh toan", "da chuyen", "chuyen tien",
+        "chuyen khoan den", " den:", "den:", " ck ", "gd:-",
+    )
+    income_keywords = (
+        "nhan tien", "chuyen khoan tu", "ghi co", "cong tien",
+        " nhan", " tu:", " tu ", "gd:+",
+    )
+    tx_type: Optional[int] = None
+    if any(keyword in normalized for keyword in expense_keywords):
+        tx_type = 0
+    elif any(keyword in normalized for keyword in income_keywords):
+        tx_type = 1
+    return amount, tx_type, set()
+
+
+def sanitize_transaction_note(note: str) -> str:
+    clean = str(note or "")
+    clean = _AUTO_BALANCE_RE.sub(" ", clean)
+    clean = _AUTO_FT_REF_RE.sub(" ", clean)
+    clean = _AUTO_TRAILING_REF_RE.sub(" ", clean)
+    clean = _AUTO_MASKED_ACCOUNT_RE.sub(" ", clean)
+    clean = _AUTO_LONG_NUMBER_RE.sub(" ", clean)
+    clean = re.sub(r"\b(?:tk|sd|tu|den)\s*:\s*", " ", clean, flags=re.IGNORECASE)
+    clean = clean.strip(" \"'|,.;:-")
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean[:50]
+
+
+def _extract_auto_note_candidate(text: str) -> str:
+    message_match = _AUTO_MESSAGE_MARKER_RE.search(text or "")
+    if message_match:
+        raw_message = message_match.group(1).split("|", 1)[0].strip()
+        quoted = re.search(r"[\"“](.+?)[\"”]", raw_message)
+        return quoted.group(1) if quoted else raw_message
+
+    marker_match = _AUTO_NOTE_MARKER_RE.search(text or "")
+    if marker_match:
+        return marker_match.group(1).split("|", 1)[0].strip()
+
+    merchant_match = re.search(r"(?:tại|tai)\s+(.+)$", text or "", re.IGNORECASE | re.UNICODE)
+    if merchant_match:
+        return merchant_match.group(1).strip()
+    return ""
+
+
+def _extract_auto_notification_note(source: str, tx_type: Optional[int], title: str, text: str) -> str:
+    candidate = sanitize_transaction_note(_extract_auto_note_candidate(text))
+    combined = f"{title} {text}"
+    normalized = _normalize_intent_text(combined)
+
+    if source == "Momo" and tx_type == 1 and candidate:
+        return sanitize_transaction_note(f"Nhận tiền MoMo - {candidate}")
+    if source == "MB Bank" and tx_type == 1 and candidate:
+        return sanitize_transaction_note(f"Nhận chuyển khoản - {candidate}")
+    if candidate:
+        return candidate
+    if "thanh toan" in normalized:
+        merchant = sanitize_transaction_note(re.sub(_AUTO_MONEY_RE, " ", text or ""))
+        if merchant:
+            return merchant
+    if tx_type == 1:
+        return "Nhận tiền"
+    if tx_type == 0:
+        return "Giao dịch chi"
+    return ""
+
+
+def classify_category_from_transaction(tx_type: Optional[int], note: str, text: str) -> str:
+    if tx_type == 1:
+        return INCOME_CATEGORIES[-1]
+
+    normalized = _normalize_intent_text(f"{note} {text}")
+    food_words = (
+        "jollibee", "kfc", "lotteria", "highlands", "phuc long", "starbucks",
+        "cafe", "ca phe", "tra sua", "restaurant", "food", "an uong", "quan an",
+    )
+    shopping_words = (
+        "circle k", "cirkle k", "winmart", "vinmart", "bach hoa xanh",
+        "sieu thi", "cua hang tien loi", "grocery", "supermarket",
+        "shopee", "lazada", "tiki", "tiktok shop",
+    )
+    transport_words = ("grab", "gojek", "xanh sm", "taxi", "bus", "ve xe")
+    phone_words = ("internet", "viettel", "vnpt", "fpt", "mobifone", "vinaphone")
+    electric_words = ("tien dien", "tien nuoc", " dien", " nuoc")
+    if any(word in normalized for word in food_words):
+        return EXPENSE_CATEGORIES[0]
+    if any(word in normalized for word in shopping_words):
+        return EXPENSE_CATEGORIES[1]
+    if any(word in normalized for word in transport_words):
+        return EXPENSE_CATEGORIES[8]
+    if any(word in normalized for word in phone_words):
+        return EXPENSE_CATEGORIES[9]
+    if any(word in normalized for word in electric_words):
+        return EXPENSE_CATEGORIES[7]
+    return EXPENSE_CATEGORIES[-1]
+
+
+def _has_clear_financial_notification_signal(package_name: str, text: str) -> bool:
+    if map_package_to_source(package_name):
+        return True
+    if _AUTO_GD_MONEY_RE.search(text or ""):
+        return True
+    signed_money = bool(_AUTO_SIGNED_MONEY_RE.search(text or ""))
+    normalized = _normalize_intent_text(text or "")
+    return signed_money and any(
+        keyword in normalized
+        for keyword in ("thanh toan", "chuyen tien", "ghi co", "ghi no", "bien dong so du", "nhan tien")
+    )
+
+
+def parse_auto_notification_deterministic(title: str, text: str, package_name: str) -> Optional[dict]:
+    combined = f"{title or ''} {text or ''}".strip()
+    if not _has_clear_financial_notification_signal(package_name, combined):
+        print("[Auto Notification] skip: unsupported package without clear financial signal")
+        return None
+
+    source = map_package_to_source(package_name) or str(package_name or "").strip()
+    amount, tx_type, locked_fields = _parse_auto_amount_and_type(combined)
+    if map_package_to_source(package_name):
+        locked_fields.add("source")
+    note = _extract_auto_notification_note(source, tx_type, title or "", text or "")
+    category = classify_category_from_transaction(tx_type, note, combined) if tx_type in (0, 1) else ""
+    sanitized_note = sanitize_transaction_note(note)
+    return {
+        "type": tx_type,
+        "amount": amount,
+        "category": category,
+        "note": sanitized_note,
+        "date": _auto_today_str(),
+        "source": source,
+        "_locked_fields": locked_fields,
+        "_needs_ai": sanitized_note in {"Nhận tiền", "Giao dịch chi"},
+    }
+
+
+def _auto_deterministic_complete(parsed: Optional[dict]) -> bool:
+    return bool(
+        parsed
+        and parsed.get("amount")
+        and parsed.get("type") in (0, 1)
+        and str(parsed.get("source") or "").strip()
+        and str(parsed.get("note") or "").strip()
+        and str(parsed.get("category") or "").strip()
+    )
+
+
+def _auto_deterministic_ready(parsed: Optional[dict]) -> bool:
+    return bool(_auto_deterministic_complete(parsed) and not parsed.get("_needs_ai"))
+
+
+def _merge_auto_notification_parse(deterministic: dict, ai_parsed: Optional[dict]) -> dict:
+    merged = {**deterministic}
+    for field, value in (ai_parsed or {}).items():
+        if field in {"amount", "type", "source"}:
+            merged[field] = value
+        elif field == "category" and merged.get("category"):
+            continue
+        elif value:
+            merged[field] = value
+    locked_fields = set(deterministic.get("_locked_fields") or set())
+    for field in ("amount", "type", "source"):
+        if field in locked_fields:
+            merged[field] = deterministic.get(field)
+    if not merged.get("amount"):
+        merged["amount"] = deterministic.get("amount")
+    if merged.get("type") not in (0, 1):
+        merged["type"] = deterministic.get("type")
+    merged["source"] = str(merged.get("source") or deterministic.get("source") or "").strip()
+    merged["note"] = sanitize_transaction_note(merged.get("note") or deterministic.get("note") or "")
+    tx_type = merged.get("type")
+    valid_categories = INCOME_CATEGORIES if tx_type == 1 else EXPENSE_CATEGORIES
+    if merged.get("category") not in valid_categories:
+        merged["category"] = deterministic.get("category") or valid_categories[-1]
+    merged.pop("_locked_fields", None)
+    merged.pop("_needs_ai", None)
+    return merged
 
 
 @app.post("/api/ai/assistant")
@@ -2472,6 +2711,8 @@ def process_ai_and_save(
     text: str,
     is_auto_detect: bool = False,
     package_name: Optional[str] = None,
+    notification_title: Optional[str] = None,
+    notification_text: Optional[str] = None,
 ):
     """
     Background Task — KHÔNG có network call nào trong Firestore Transaction.
@@ -2484,6 +2725,20 @@ def process_ai_and_save(
         )
         print(f"[MULTI_PARSE] enabled={ENABLE_MULTI_TRANSACTION_PARSE}")
 
+        parsed = None
+        deterministic_auto = None
+        if is_auto_detect:
+            deterministic_auto = parse_auto_notification_deterministic(
+                notification_title or "",
+                notification_text or text,
+                package_name or "",
+            )
+            if deterministic_auto is None:
+                return
+            if _auto_deterministic_ready(deterministic_auto):
+                parsed = _merge_auto_notification_parse(deterministic_auto, None)
+                print("[Auto Notification] deterministic parse ready, skipping AI")
+
         # 2. Phân loại text → route thích hợp
         is_multi = _is_likely_multi_transaction_text(text)
         print(
@@ -2491,14 +2746,13 @@ def process_ai_and_save(
             f"multi_parse={ENABLE_MULTI_TRANSACTION_PARSE} bypass={ENABLE_MERCHANT_BYPASS}"
         )
 
-        if is_multi and ENABLE_MULTI_TRANSACTION_PARSE:
+        if parsed is None and is_multi and ENABLE_MULTI_TRANSACTION_PARSE:
             print("[MULTI_PARSE] using multi flow")
             _process_ai_and_save_multi(bot_token, firebase_uid, chat_id, text, is_auto_detect, package_name)
             return
 
         # Single-transaction path (hoặc multi text với MULTI_PARSE=false → legacy AI)
-        parsed = None
-        if not is_multi and ENABLE_MERCHANT_LEARNING and ENABLE_MERCHANT_BYPASS:
+        if parsed is None and not is_multi and ENABLE_MERCHANT_LEARNING and ENABLE_MERCHANT_BYPASS:
             parsed = _try_merchant_bypass(firebase_uid, text, is_auto_detect)
 
         if parsed is None:
@@ -2508,10 +2762,19 @@ def process_ai_and_save(
                 print("[MerchantLearning] FALLBACK_AI")
             try:
                 parsed = analyze_text_with_gemini(text)
+                if is_auto_detect and deterministic_auto:
+                    parsed = _merge_auto_notification_parse(deterministic_auto, parsed)
                 print("[Auto Notification] AI parse success" if is_auto_detect else "[AI Parse] success")
             except Exception as ai_err:
                 print(f"[Auto Notification] AI parse fail: {sanitize_log_text(ai_err)}")
-                raise
+                if is_auto_detect and _auto_deterministic_complete(deterministic_auto):
+                    parsed = _merge_auto_notification_parse(deterministic_auto or {}, None)
+                    print("[Auto Notification] deterministic parse retained after AI failure")
+                elif is_auto_detect:
+                    print("[Auto Notification] skip: AI failed and deterministic amount/type is incomplete")
+                    return
+                else:
+                    raise
         else:
             print("[MerchantLearning] BYPASS success, skipping AI call")
         if parsed == "ERROR_TIMEOUT":
@@ -2522,6 +2785,10 @@ def process_ai_and_save(
 
         if is_auto_detect:
             parsed = _apply_auto_notification_source(parsed, package_name)
+            parsed["note"] = sanitize_transaction_note(parsed.get("note", ""))
+            if not parsed.get("amount") or parsed.get("type") not in (0, 1):
+                print("[Auto Notification] skip: amount/type unavailable after parser merge")
+                return
 
         print(
             f"[AI Result] type={parsed.get('type')}, amount={parsed.get('amount')}, "
@@ -2763,7 +3030,17 @@ async def process_notification(req: NotificationProcessRequest, background_tasks
     print(f"[Notification API] text_length={len(combined_text)}")
     
     # process_ai_and_save xử lý phân tích và lưu, nếu thành công sẽ gửi FCM push notification
-    background_tasks.add_task(process_ai_and_save, None, req.firebase_uid, None, combined_text, True, req.package_name)
+    background_tasks.add_task(
+        process_ai_and_save,
+        None,
+        req.firebase_uid,
+        None,
+        combined_text,
+        True,
+        req.package_name,
+        req.title,
+        req.text,
+    )
     
     return {"status": "processing"}
 
