@@ -327,6 +327,46 @@ class AutoNotificationPipelineTests(unittest.TestCase):
                 for forbidden in case["forbidden"]:
                     self.assertNotIn(forbidden, merged["note"])
 
+    def test_momo_render_payload_uses_deterministic_parser_without_ai(self):
+        saved_payloads = []
+
+        def _save(_uid, payload, _prefix):
+            saved_payloads.append(payload)
+            return "at_momo"
+
+        with patch("main.analyze_text_with_gemini") as ai, \
+            patch("main._save_transaction_atomic", side_effect=_save), \
+            patch("main._send_fcm_notification"), \
+            patch("main._send_auto_detect_telegram_notification"), \
+            patch("agentic_ai.check_budget_thresholds"), \
+            patch("builtins.print") as printed:
+            main.process_ai_and_save(
+                None,
+                "uid",
+                None,
+                'Thông báo từ ứng dụng com.mservice.momotransfer: Nhận tiền chuyển khoản từ NGUYEN HOANG SON - Số tiền 8.000 ₫, kèm lời nhắn: "Test doc giao dich v3 FT26142263740354".',
+                True,
+                "com.mservice.momotransfer",
+                "Nhận tiền chuyển khoản từ NGUYEN HOANG SON",
+                'Số tiền 8.000 ₫, kèm lời nhắn: "Test doc giao dich v3 FT26142263740354".',
+            )
+
+        ai.assert_not_called()
+        self.assertEqual(len(saved_payloads), 1)
+        self.assertEqual(saved_payloads[0]["amount"], 8000)
+        self.assertEqual(saved_payloads[0]["type"], 1)
+        self.assertEqual(saved_payloads[0]["source"], "Momo")
+        self.assertEqual(saved_payloads[0]["category"], main.INCOME_CATEGORIES[-1])
+        self.assertEqual(
+            saved_payloads[0]["note"],
+            "Nhận tiền MoMo từ NGUYEN HOANG SON - Test doc giao dich v3",
+        )
+        self.assertNotIn("FT26142263740354", saved_payloads[0]["note"])
+        log_lines = [" ".join(str(part) for part in call.args) for call in printed.call_args_list]
+        self.assertIn("[AutoParser] deterministic_success=True", log_lines)
+        self.assertIn("[AutoParser] locked_fields=amount,type,source,note", log_lines)
+        self.assertIn("[AutoParser] ai_fallback=False", log_lines)
+
     def test_gd_sign_locks_amount_type_and_mapped_source_from_ai_override(self):
         deterministic = main.parse_auto_notification_deterministic(
             "Thông báo biến động số dư",

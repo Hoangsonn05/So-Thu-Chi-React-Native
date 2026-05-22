@@ -644,15 +644,15 @@ def _apply_auto_notification_source(parsed: dict, package_name: Optional[str]) -
 
 
 _AUTO_GD_MONEY_RE = re.compile(
-    r"\bgd\s*:\s*([+-])\s*([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]+)\s*(?:vnd|đ|d)",
+    r"\bgd\s*:\s*([+-])\s*([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]+)\s*(?:vnd|đ|₫|d)",
     re.IGNORECASE | re.UNICODE,
 )
 _AUTO_SIGNED_MONEY_RE = re.compile(
-    r"(?<![A-Za-z0-9])([+-])\s*([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]+)\s*(?:vnd|đ|d)",
+    r"(?<![A-Za-z0-9])([+-])\s*([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]+)\s*(?:vnd|đ|₫|d)",
     re.IGNORECASE | re.UNICODE,
 )
 _AUTO_MONEY_RE = re.compile(
-    r"(?<![A-Za-z0-9])([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]+)\s*(?:vnd|đ|d)",
+    r"(?<![A-Za-z0-9])([0-9]{1,3}(?:[.,][0-9]{3})+|[0-9]+)\s*(?:vnd|đ|₫|d)",
     re.IGNORECASE | re.UNICODE,
 )
 _AUTO_NOTE_MARKER_RE = re.compile(
@@ -859,7 +859,7 @@ def parse_auto_notification_deterministic(title: str, text: str, package_name: s
         locked_fields.add("source")
     note = _extract_auto_notification_note(source, tx_type, title or "", text or "")
     if source == "Momo" and amount and tx_type in (0, 1) and note:
-        locked_fields.add("note")
+        locked_fields.update({"amount", "type", "note"})
     category = classify_category_from_transaction(tx_type, note, combined) if tx_type in (0, 1) else ""
     sanitized_note = sanitize_transaction_note(note)
     return {
@@ -887,6 +887,18 @@ def _auto_deterministic_complete(parsed: Optional[dict]) -> bool:
 
 def _auto_deterministic_ready(parsed: Optional[dict]) -> bool:
     return bool(_auto_deterministic_complete(parsed) and not parsed.get("_needs_ai"))
+
+
+def _auto_parser_note_preview(parsed: Optional[dict]) -> str:
+    return sanitize_transaction_note((parsed or {}).get("note", ""))[:200]
+
+
+def _auto_parser_missing_reason(parsed: Optional[dict]) -> str:
+    if not parsed or not parsed.get("amount") or parsed.get("type") not in (0, 1):
+        return "missing_amount_or_type_or_note"
+    if not str(parsed.get("source") or "").strip() or not str(parsed.get("note") or "").strip():
+        return "missing_amount_or_type_or_note"
+    return "weak_note"
 
 
 def _merge_auto_notification_parse(deterministic: dict, ai_parsed: Optional[dict]) -> dict:
@@ -2768,16 +2780,34 @@ def process_ai_and_save(
         parsed = None
         deterministic_auto = None
         if is_auto_detect:
+            mapped_source = map_package_to_source(package_name or "") or str(package_name or "").strip()
+            print(f"[AutoParser] package={package_name or ''} source={mapped_source}")
+            print("[AutoParser] deterministic_attempt=True")
             deterministic_auto = parse_auto_notification_deterministic(
                 notification_title or "",
                 notification_text or text,
                 package_name or "",
             )
             if deterministic_auto is None:
+                print("[AutoParser] deterministic_success=False")
+                print("[AutoParser] ai_fallback=False")
                 return
             if _auto_deterministic_ready(deterministic_auto):
                 parsed = _merge_auto_notification_parse(deterministic_auto, None)
+                locked_fields = ",".join(
+                    field
+                    for field in ("amount", "type", "source", "note")
+                    if field in set(deterministic_auto.get("_locked_fields") or set())
+                )
+                print("[AutoParser] deterministic_success=True")
+                print(f"[AutoParser] locked_fields={locked_fields}")
+                print("[AutoParser] ai_fallback=False")
+                print(f"[AutoParser] note_preview={_auto_parser_note_preview(parsed)}")
                 print("[Auto Notification] deterministic parse ready, skipping AI")
+            else:
+                print("[AutoParser] deterministic_success=False")
+                print("[AutoParser] ai_fallback=True")
+                print(f"[AutoParser] reason={_auto_parser_missing_reason(deterministic_auto)}")
 
         # 2. Phân loại text → route thích hợp
         is_multi = _is_likely_multi_transaction_text(text)
